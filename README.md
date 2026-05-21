@@ -13,7 +13,7 @@ render) plug into the JSON bundle this stage writes.
 - ✅ Stage 3 — pause / filler / retake classification (Claude Opus 4.7)
 - ✅ Stage 4 — cut planner (interval algebra → edit decision list)
 - ✅ Stage 5 — renderer (FFmpeg, libx264 + AAC, per-segment audio fades)
-- ⏳ Stage 6 — review UI
+- ✅ Stage 6 — review UI (per-cut audio playback, accept/reject, re-plan)
 
 ## Prereqs
 
@@ -131,7 +131,23 @@ Useful flags:
 - `--default-breath-ms 150` — breath trim when classifier didn't specify
 - `--min-keep-ms 80` — drop sliver keeps shorter than this
 
-#### 5. Render the MP4 (stage 5)
+#### 5. Review & refine (stage 6, UI only)
+
+The Streamlit UI has a **Review & refine** section between *Plan results* and
+*Render*. For each classifier decision, listen to a ~3-second mic clip around
+the cut, override the action with one click, then **Apply changes** to
+re-plan. The render section picks up the refined plan automatically.
+
+- Filters: pauses only / fillers only / retakes only / my overrides only / everything
+- Per-row audio playback (cached, fast on revisit)
+- 20 rows per page with prev/next
+- Pending-overrides counter + reset button
+- Live preview of how the override set would change the output duration
+
+This step is optional. If the classifier got everything right, skip straight
+from Plan to Render.
+
+#### 6. Render the MP4 (stage 5)
 
 ```sh
 uv run video-editor render path/to/recording.analysis.json
@@ -179,13 +195,14 @@ Useful flags:
 ```
 src/video_editor/
 ├── cli.py        # typer CLI: probe / analyze / classify / plan / render / ui
-├── ui.py         # streamlit app
+├── ui.py         # streamlit app (10 sections, full pipeline + review)
 ├── ingest.py     # ffprobe + ffmpeg extraction
 ├── speech.py     # Silero VAD + transcription dispatch
 ├── backends.py   # groq + local (faster-whisper) transcription backends
 ├── classifier.py # pause / filler / retake classifier (Claude Opus 4.7)
 ├── planner.py    # interval algebra → CutPlan (no API, no video)
 ├── renderer.py   # FFmpeg filter_complex (trim + concat + fades) → MP4
+├── reviewer.py   # apply_overrides() + per-cut audio clip extraction
 ├── models.py     # pydantic data models (JSON contract)
 └── __init__.py
 ```

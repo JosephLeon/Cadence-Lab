@@ -34,6 +34,7 @@ from video_editor.models import (
 )
 from video_editor.planner import plan_cuts
 from video_editor.renderer import RenderError, render as run_render
+from video_editor.reviewer import apply_overrides, extract_audio_clip
 from video_editor.speech import analyze
 
 load_dotenv()
@@ -52,6 +53,12 @@ _DEFAULTS: dict[str, object] = {
     "cut_plan": None,                # CutPlan | None
     "plan_json_path": None,          # Path | None
     "rendered_path": None,           # Path | None
+    # Review state ───────────────────────────────────────────────────────────
+    # User overrides on classifier decisions: {(kind, source_id): override_value}
+    "classification_overrides": {},  # dict[tuple[str, int], str]
+    "review_page": 0,
+    "review_filter": "All non-keep",
+    "review_show_keeps": False,
 }
 for k, v in _DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -77,6 +84,8 @@ def _reset_downstream() -> None:
     st.session_state.cut_plan = None
     st.session_state.plan_json_path = None
     st.session_state.rendered_path = None
+    st.session_state.classification_overrides = {}
+    st.session_state.review_page = 0
 
 
 def _render_probe(p: SourceProbe) -> None:
@@ -375,9 +384,12 @@ if st.session_state.analysis_bundle is not None:
     if run_cls:
         st.session_state.classification_bundle = None
         st.session_state.classification_json_path = None
-        # Reclassification invalidates any downstream cut plan.
+        # Reclassification invalidates any downstream cut plan AND overrides
+        # (the source IDs are about to change).
         st.session_state.cut_plan = None
         st.session_state.plan_json_path = None
+        st.session_state.classification_overrides = {}
+        st.session_state.review_page = 0
 
         progress_bar = st.progress(0.0)
         status_line = st.empty()
@@ -639,9 +651,313 @@ if st.session_state.cut_plan is not None:
         mime="application/json",
     )
 
-# ─── 9. Render (Stage 5) ──────────────────────────────────────────────────────
+# ─── 9. Review & refine (Stage 6) ─────────────────────────────────────────────
+# Per-cut review with inline audio. User decisions get stored in
+# session_state.classification_overrides keyed by (kind, source_id); clicking
+# "Apply changes" re-runs the planner with apply_overrides() and refreshes the
+# plan in place. Pagination keeps the page responsive on long videos with
+# hundreds of cuts.
+REVIEW_PAGE_SIZE = 20
+
+
+@st.cache_data(show_spinner=False, max_entries=512)
+def _cached_audio_clip(audio_path: str, start: float, end: float, pad: float) -> bytes:
+    """st.cache_data wrapper around the reviewer's clip extractor."""
+    return extract_audio_clip(Path(audio_path), start, end, pad_seconds=pad)
+
+
+def _context_around(
+    words, start: float, end: float, before: int = 6, after: int = 6,
+) -> tuple[str, str, str]:
+    """Pull the few words just before / inside / after a time range."""
+    before_words = [w for w in words if w.end <= start + 0.001]
+    in_words = [w for w in words if w.start >= start - 0.001 and w.end <= end + 0.001]
+    after_words = [w for w in words if w.start >= end - 0.001]
+    return (
+        " ".join(w.text.strip() for w in before_words[-before:]),
+        " ".join(w.text.strip() for w in in_words),
+        " ".join(w.text.strip() for w in after_words[:after]),
+    )
+
+
+def _fmt_clock(s: float) -> str:
+    m, sec = divmod(int(s), 60)
+    return f"{m:02d}:{sec:02d}"
+
+
+def _review_row_pause(p, cand, words, audio_path: Path) -> None:
+    """One expandable review row for a classified pause."""
+    key = ("pause", p.id)
+    current = st.session_state.classification_overrides.get(key, p.action)
+    icon = {"cut": "✂️", "trim": "✂︎", "keep": "•"}[current]
+    overridden = " ⟵ overridden" if key in st.session_state.classification_overrides else ""
+    with st.expander(
+        f"{icon}  [{_fmt_clock(cand.start)}]  pause {cand.duration*1000:.0f}ms  "
+        f"— {p.category}: {p.reason}{overridden}"
+    ):
+        before, _, after = _context_around(words, cand.start, cand.end)
+        st.caption(f"…{before}  ▎{cand.duration*1000:.0f}ms pause▎  {after}…")
+        try:
+            audio = _cached_audio_clip(str(audio_path), cand.start, cand.end, 1.5)
+            st.audio(audio, format="audio/mp3")
+        except Exception as e:
+            st.caption(f"_audio unavailable: {e}_")
+        choice = st.radio(
+            "Action",
+            options=["cut", "trim", "keep"],
+            index=["cut", "trim", "keep"].index(current),
+            horizontal=True,
+            key=f"action_pause_{p.id}",
+            label_visibility="collapsed",
+        )
+        if choice != p.action:
+            st.session_state.classification_overrides[key] = choice
+        elif key in st.session_state.classification_overrides:
+            del st.session_state.classification_overrides[key]
+
+
+def _review_row_filler(f, cand, words, audio_path: Path) -> None:
+    key = ("filler", f.id)
+    current = st.session_state.classification_overrides.get(key, f.action)
+    icon = {"cut": "✂️", "keep": "•"}[current]
+    overridden = " ⟵ overridden" if key in st.session_state.classification_overrides else ""
+    with st.expander(
+        f"{icon}  [{_fmt_clock(cand.start)}]  filler “{cand.text}”  — {f.reason}{overridden}"
+    ):
+        before, hit, after = _context_around(words, cand.start, cand.end, before=8, after=8)
+        st.caption(f"…{before}  ▎{hit or cand.text}▎  {after}…")
+        try:
+            audio = _cached_audio_clip(str(audio_path), cand.start, cand.end, 1.0)
+            st.audio(audio, format="audio/mp3")
+        except Exception as e:
+            st.caption(f"_audio unavailable: {e}_")
+        choice = st.radio(
+            "Action",
+            options=["cut", "keep"],
+            index=["cut", "keep"].index(current),
+            horizontal=True,
+            key=f"action_filler_{f.id}",
+            label_visibility="collapsed",
+        )
+        if choice != f.action:
+            st.session_state.classification_overrides[key] = choice
+        elif key in st.session_state.classification_overrides:
+            del st.session_state.classification_overrides[key]
+
+
+def _review_row_retake(idx: int, r, words, audio_path: Path) -> None:
+    key = ("retake", idx)
+    current = st.session_state.classification_overrides.get(key, "accept")
+    icon = "✂️" if current == "accept" else "•"
+    overridden = " ⟵ overridden" if key in st.session_state.classification_overrides else ""
+    cut_dur = (r.cut_end - r.cut_start) * 1000
+    with st.expander(
+        f"{icon}  [{_fmt_clock(r.cut_start)}]  retake — drop {cut_dur:.0f}ms  "
+        f"— {r.reason}{overridden}"
+    ):
+        # Show transcript for both the cut and keep ranges.
+        _, cut_text, _ = _context_around(words, r.cut_start, r.cut_end, before=0, after=0)
+        _, keep_text, _ = _context_around(words, r.keep_start, r.keep_end, before=0, after=0)
+        st.caption(f"**Cut (first take):**  {cut_text}")
+        st.caption(f"**Keep (better take):**  {keep_text}")
+        try:
+            # Play the cut + keep range together so user can compare both takes.
+            audio = _cached_audio_clip(
+                str(audio_path), r.cut_start, r.keep_end, 0.5
+            )
+            st.audio(audio, format="audio/mp3")
+        except Exception as e:
+            st.caption(f"_audio unavailable: {e}_")
+        choice = st.radio(
+            "Action",
+            options=["accept", "reject"],
+            index=["accept", "reject"].index(current),
+            horizontal=True,
+            key=f"action_retake_{idx}",
+            label_visibility="collapsed",
+        )
+        if choice == "reject":
+            st.session_state.classification_overrides[key] = "reject"
+        elif key in st.session_state.classification_overrides:
+            del st.session_state.classification_overrides[key]
+
+
+if (
+    st.session_state.cut_plan is not None
+    and st.session_state.classification_bundle is not None
+    and st.session_state.analysis_bundle is not None
+):
+    st.header("9. Review & refine")
+    st.caption(
+        "Listen to each proposed cut, override the classifier when it got "
+        "something wrong, then **Apply changes** to re-plan. The render in "
+        "section 10 picks up the refined plan automatically."
+    )
+
+    cls_bundle = st.session_state.classification_bundle
+    cls_orig = cls_bundle.classification
+    speech = st.session_state.analysis_bundle.speech
+    audio_path = st.session_state.analysis_bundle.ingest.normalized_audio_path
+    words = speech.words
+
+    pause_by_id = {c.id: c for c in cls_bundle.pause_candidates}
+    filler_by_id = {c.id: c for c in cls_bundle.filler_candidates}
+
+    # ── Filter / display controls
+    fc1, fc2, fc3 = st.columns([2, 2, 1])
+    with fc1:
+        filt = st.selectbox(
+            "Show",
+            options=[
+                "All non-keep",
+                "Pauses only",
+                "Fillers only",
+                "Retakes only",
+                "My overrides only",
+                "Everything",
+            ],
+            index=0,
+            key="review_filter_select",
+        )
+    with fc2:
+        st.metric(
+            "Pending overrides",
+            str(len(st.session_state.classification_overrides)),
+        )
+    with fc3:
+        if st.button("Reset overrides"):
+            st.session_state.classification_overrides = {}
+            st.rerun()
+
+    # ── Build the row list (sorted by source start)
+    rows: list[tuple[float, str, object, object]] = []
+    show_keeps = filt in ("Everything",)
+
+    if filt in ("All non-keep", "Pauses only", "Everything", "My overrides only"):
+        for p in cls_orig.pauses:
+            cand = pause_by_id.get(p.id)
+            if cand is None:
+                continue
+            if filt == "My overrides only":
+                if ("pause", p.id) not in st.session_state.classification_overrides:
+                    continue
+            elif not show_keeps and p.action == "keep":
+                continue
+            if filt == "Pauses only" or filt == "All non-keep" or filt == "Everything" or filt == "My overrides only":
+                rows.append((cand.start, "pause", p, cand))
+
+    if filt in ("All non-keep", "Fillers only", "Everything", "My overrides only"):
+        for f in cls_orig.fillers:
+            cand = filler_by_id.get(f.id)
+            if cand is None:
+                continue
+            if filt == "My overrides only":
+                if ("filler", f.id) not in st.session_state.classification_overrides:
+                    continue
+            elif not show_keeps and f.action == "keep":
+                continue
+            rows.append((cand.start, "filler", f, cand))
+
+    if filt in ("All non-keep", "Retakes only", "Everything", "My overrides only"):
+        for i, r in enumerate(cls_orig.retakes):
+            if filt == "My overrides only":
+                if ("retake", i) not in st.session_state.classification_overrides:
+                    continue
+            rows.append((r.cut_start, "retake", (i, r), None))
+
+    rows.sort(key=lambda x: x[0])
+
+    if not rows:
+        st.info("Nothing to review with the current filter.")
+    else:
+        # ── Pagination
+        total_pages = (len(rows) + REVIEW_PAGE_SIZE - 1) // REVIEW_PAGE_SIZE
+        page = min(st.session_state.review_page, max(total_pages - 1, 0))
+        page_start = page * REVIEW_PAGE_SIZE
+        page_end = min(page_start + REVIEW_PAGE_SIZE, len(rows))
+
+        page_cols = st.columns([1, 4, 1])
+        with page_cols[0]:
+            if st.button("← Prev", disabled=(page <= 0)):
+                st.session_state.review_page = max(0, page - 1)
+                st.rerun()
+        with page_cols[1]:
+            st.caption(
+                f"Showing {page_start + 1}–{page_end} of {len(rows)} items   "
+                f"(page {page + 1} of {total_pages})"
+            )
+        with page_cols[2]:
+            if st.button("Next →", disabled=(page >= total_pages - 1)):
+                st.session_state.review_page = min(total_pages - 1, page + 1)
+                st.rerun()
+
+        for _, kind, item, cand in rows[page_start:page_end]:
+            if kind == "pause":
+                _review_row_pause(item, cand, words, audio_path)
+            elif kind == "filler":
+                _review_row_filler(item, cand, words, audio_path)
+            elif kind == "retake":
+                idx, r = item  # type: ignore[misc]
+                _review_row_retake(idx, r, words, audio_path)
+
+    # ── Apply changes (re-plan)
+    st.divider()
+    apply_col, preview_col = st.columns([1, 3])
+    with apply_col:
+        apply = st.button(
+            "▶ Apply changes & re-plan",
+            type="primary",
+            disabled=(len(st.session_state.classification_overrides) == 0),
+        )
+    with preview_col:
+        # Compute a preview of impact without committing.
+        if st.session_state.classification_overrides:
+            try:
+                modified = apply_overrides(
+                    cls_orig, st.session_state.classification_overrides
+                )
+                preview_plan = plan_cuts(
+                    speech,
+                    cls_bundle.model_copy(update={"classification": modified}),
+                    params=st.session_state.cut_plan.params,
+                )
+                delta = preview_plan.output_duration - st.session_state.cut_plan.output_duration
+                arrow = "↑" if delta > 0 else "↓"
+                st.caption(
+                    f"Preview: output would be **{preview_plan.output_duration:.1f}s** "
+                    f"({arrow}{abs(delta):.1f}s vs current plan)"
+                )
+            except Exception as e:
+                st.caption(f"_preview unavailable: {e}_")
+
+    if apply:
+        modified = apply_overrides(
+            cls_orig, st.session_state.classification_overrides
+        )
+        modified_bundle = cls_bundle.model_copy(update={"classification": modified})
+        new_plan = plan_cuts(
+            speech,
+            modified_bundle,
+            params=st.session_state.cut_plan.params,
+        )
+        st.session_state.cut_plan = new_plan
+        # Re-save the plan JSON alongside the source.
+        if st.session_state.source_path is not None:
+            plan_path = st.session_state.source_path.with_suffix(".plan.json")
+            plan_path.write_text(
+                json.dumps(new_plan.model_dump(mode="json"), indent=2)
+            )
+            st.session_state.plan_json_path = plan_path
+        # An earlier render is now stale.
+        st.session_state.rendered_path = None
+        st.success(
+            f"Re-planned with {len(st.session_state.classification_overrides)} "
+            f"override(s) applied. New duration: {new_plan.output_duration:.1f}s."
+        )
+
+# ─── 10. Render (Stage 5) ─────────────────────────────────────────────────────
 if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is not None:
-    st.header("9. Render to MP4")
+    st.header("10. Render to MP4")
     st.caption(
         "Executes the cut plan against the source video. libx264 + AAC, "
         "audio fade-in/out at every cut for click-free joins. Slow but quality-first."
@@ -719,9 +1035,9 @@ if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is
             size_mb = out_path.stat().st_size / 1_048_576
             st.success(f"Rendered {out_path.name} ({size_mb:.1f} MB)")
 
-# ─── 10. Output ───────────────────────────────────────────────────────────────
+# ─── 11. Output ───────────────────────────────────────────────────────────────
 if st.session_state.rendered_path is not None and st.session_state.rendered_path.exists():
-    st.header("10. Output")
+    st.header("11. Output")
     out_path = st.session_state.rendered_path
 
     size_mb = out_path.stat().st_size / 1_048_576
