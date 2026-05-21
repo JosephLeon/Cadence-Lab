@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.pyc
+.python-version
+
+# Python build / packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Test / lint / type caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Project outputs and intermediates
+output/
+*.analysis.json
+*.mic.16k.wav
+
+# Streamlit — keep project-wide config.toml, ignore per-user credentials
+.streamlit/credentials.toml
+
+# Models cached by faster-whisper / huggingface (if pointed at the repo)
+.cache/
+
+# OS / editor noise
+.DS_Store
+.vscode/
+.idea/
