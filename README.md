@@ -11,8 +11,8 @@ render) plug into the JSON bundle this stage writes.
 - ✅ Stage 1 — ingest (probe + mic-track extraction + 16 kHz mono normalization)
 - ✅ Stage 2 — speech analysis (Silero VAD + Whisper word timestamps, Groq backend)
 - ✅ Stage 3 — pause / filler / retake classification (Claude Opus 4.7)
-- ⏳ Stage 4 — cut planner (snap to screen-change zones, breath handling, crossfades)
-- ⏳ Stage 5 — renderer (FFmpeg, stream-copy where possible)
+- ✅ Stage 4 — cut planner (interval algebra → edit decision list)
+- ⏳ Stage 5 — renderer (FFmpeg, stream-copy where possible, audio crossfades)
 - ⏳ Stage 6 — review UI
 
 ## Prereqs
@@ -108,6 +108,29 @@ Useful flags:
 - `--min-pause-ms 250` (default) — gaps below this aren't classified
 - `--out path/file.json` — override output location
 
+#### 4. Build the cut plan (stage 4)
+
+```sh
+uv run video-editor plan path/to/recording.analysis.json
+```
+
+Pure interval algebra — no API calls, no network, no video touched. Reads the
+analysis JSON + the matching `.classified.json` (auto-discovered alongside) and
+produces `recording.plan.json` containing:
+
+- **`keeps`**: ordered list of source-video time ranges that survive editing
+- **`cuts`**: audit log of every classifier-driven cut (kind + reason)
+- **`params`**: the crossfade / breath / pad values used
+- summary stats (source duration, output duration, time saved)
+
+The plan is the contract for the renderer (stage 5).
+
+Useful flags:
+- `--crossfade-ms 20` — audio crossfade at every cut boundary
+- `--filler-pad-ms 20` — buffer around each filler cut (Whisper jitter)
+- `--default-breath-ms 150` — breath trim when classifier didn't specify
+- `--min-keep-ms 80` — drop sliver keeps shorter than this
+
 Writes a structured JSON bundle (`recording.analysis.json`) containing:
 
 - the source probe (codecs, resolution, fps, VFR flag, all audio tracks)
@@ -135,12 +158,13 @@ Useful flags:
 
 ```
 src/video_editor/
-├── cli.py        # typer CLI: `probe`, `analyze`, `classify`, `ui`
+├── cli.py        # typer CLI: `probe`, `analyze`, `classify`, `plan`, `ui`
 ├── ui.py         # streamlit app
 ├── ingest.py     # ffprobe + ffmpeg extraction
 ├── speech.py     # Silero VAD + transcription dispatch
 ├── backends.py   # groq + local (faster-whisper) transcription backends
 ├── classifier.py # pause / filler / retake classifier (Claude Opus 4.7)
+├── planner.py    # interval algebra → CutPlan (no API, no video)
 ├── models.py     # pydantic data models (JSON contract)
 └── __init__.py
 ```

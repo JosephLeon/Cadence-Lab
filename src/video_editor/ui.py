@@ -25,7 +25,14 @@ from dotenv import load_dotenv
 
 from video_editor.classifier import classify as run_classify
 from video_editor.ingest import IngestError, ingest, probe
-from video_editor.models import AnalysisBundle, ClassificationBundle, SourceProbe
+from video_editor.models import (
+    AnalysisBundle,
+    ClassificationBundle,
+    CutPlan,
+    CutPlanParams,
+    SourceProbe,
+)
+from video_editor.planner import plan_cuts
 from video_editor.speech import analyze
 
 load_dotenv()
@@ -41,6 +48,8 @@ _DEFAULTS: dict[str, object] = {
     "analysis_json_path": None, # Path | None
     "classification_bundle": None,  # ClassificationBundle | None
     "classification_json_path": None,  # Path | None
+    "cut_plan": None,                # CutPlan | None
+    "plan_json_path": None,          # Path | None
 }
 for k, v in _DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -63,6 +72,8 @@ def _reset_downstream() -> None:
     st.session_state.analysis_json_path = None
     st.session_state.classification_bundle = None
     st.session_state.classification_json_path = None
+    st.session_state.cut_plan = None
+    st.session_state.plan_json_path = None
 
 
 def _render_probe(p: SourceProbe) -> None:
@@ -361,6 +372,9 @@ if st.session_state.analysis_bundle is not None:
     if run_cls:
         st.session_state.classification_bundle = None
         st.session_state.classification_json_path = None
+        # Reclassification invalidates any downstream cut plan.
+        st.session_state.cut_plan = None
+        st.session_state.plan_json_path = None
 
         progress_bar = st.progress(0.0)
         status_line = st.empty()
@@ -484,5 +498,140 @@ if st.session_state.classification_bundle is not None:
             st.session_state.classification_json_path
             or Path("classification.json")
         ).name,
+        mime="application/json",
+    )
+
+# ─── 7. Plan cuts (Stage 4) ───────────────────────────────────────────────────
+if st.session_state.classification_bundle is not None:
+    st.header("7. Plan cuts")
+    st.caption(
+        "Converts the classification into a concrete edit decision list — the "
+        "list of source-video time ranges that survive into the final cut. "
+        "Pure interval algebra: pause cuts, breath trims, filler cuts, and "
+        "retakes get merged, the complement in [0, duration] becomes the keeps."
+    )
+
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        plan_crossfade_ms = st.slider(
+            "Crossfade at each cut (ms)",
+            min_value=0, max_value=60, value=20, step=5,
+            help="Recorded in the plan; applied by the renderer.",
+        )
+        plan_filler_pad_ms = st.slider(
+            "Pad around filler cuts (ms)",
+            min_value=0, max_value=80, value=20, step=5,
+            help="Buffer on each side of a cut filler to avoid clipping adjacent words.",
+        )
+    with pc2:
+        plan_breath_ms = st.slider(
+            "Default breath trim (ms)",
+            min_value=80, max_value=300, value=150, step=10,
+            help=(
+                "Used when the classifier didn't specify trim_to_ms. Keeping ~150ms "
+                "of breath preserves natural pacing; cutting fully sounds robotic."
+            ),
+        )
+        plan_min_keep_ms = st.slider(
+            "Drop keep-segments shorter than (ms)",
+            min_value=0, max_value=200, value=80, step=10,
+            help="Sliver keeps from overlapping cuts — inaudible after crossfade.",
+        )
+
+    if st.button("▶ Build cut plan", type="primary"):
+        params = CutPlanParams(
+            crossfade_ms=plan_crossfade_ms,
+            filler_pad_ms=plan_filler_pad_ms,
+            default_breath_ms=plan_breath_ms,
+            min_keep_ms=plan_min_keep_ms,
+        )
+        try:
+            plan = plan_cuts(
+                speech=st.session_state.analysis_bundle.speech,
+                classification_bundle=st.session_state.classification_bundle,
+                params=params,
+            )
+        except Exception as e:
+            st.exception(e)
+        else:
+            st.session_state.cut_plan = plan
+            if st.session_state.source_path is not None:
+                plan_path = st.session_state.source_path.with_suffix(".plan.json")
+                plan_path.write_text(
+                    json.dumps(plan.model_dump(mode="json"), indent=2)
+                )
+                st.session_state.plan_json_path = plan_path
+            st.success("Cut plan built.")
+
+# ─── 8. Plan results ──────────────────────────────────────────────────────────
+if st.session_state.cut_plan is not None:
+    st.header("8. Plan results")
+    plan: CutPlan = st.session_state.cut_plan
+
+    cuts_by_kind: dict[str, list] = {}
+    removed_by_kind: dict[str, float] = {}
+    for c in plan.cuts:
+        cuts_by_kind.setdefault(c.kind, []).append(c)
+        removed_by_kind[c.kind] = removed_by_kind.get(c.kind, 0.0) + c.duration_removed
+
+    top = st.columns(4)
+    top[0].metric("Source", f"{plan.source_duration:.1f}s")
+    top[1].metric("Output", f"{plan.output_duration:.1f}s")
+    top[2].metric(
+        "Time saved",
+        f"{plan.time_saved_seconds:.1f}s",
+        delta=f"-{plan.time_saved_pct:.1f}%",
+        delta_color="inverse",
+    )
+    top[3].metric("Keep segments", str(len(plan.keeps)))
+
+    breakdown = st.columns(4)
+    for col, kind in zip(
+        breakdown, ("pause_cut", "pause_trim", "filler_cut", "retake_cut")
+    ):
+        n = len(cuts_by_kind.get(kind, []))
+        s = removed_by_kind.get(kind, 0.0)
+        col.metric(kind.replace("_", " "), f"{n} ops", f"{s:.1f}s removed")
+
+    tabs = st.tabs(["Keep segments", "Cut log", "Raw JSON"])
+
+    with tabs[0]:
+        st.dataframe(
+            [
+                {
+                    "#": i,
+                    "source_start": round(k.source_start, 2),
+                    "source_end": round(k.source_end, 2),
+                    "duration (s)": round(k.duration, 2),
+                }
+                for i, k in enumerate(plan.keeps)
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabs[1]:
+        st.dataframe(
+            [
+                {
+                    "start": round(c.source_start, 2),
+                    "end": round(c.source_end, 2),
+                    "removed (ms)": int(c.duration_removed * 1000),
+                    "kind": c.kind,
+                    "reason": c.reason,
+                }
+                for c in sorted(plan.cuts, key=lambda c: c.source_start)
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabs[2]:
+        st.json(plan.model_dump(mode="json"), expanded=False)
+
+    st.download_button(
+        "⬇ Download plan JSON",
+        data=json.dumps(plan.model_dump(mode="json"), indent=2),
+        file_name=(st.session_state.plan_json_path or Path("plan.json")).name,
         mime="application/json",
     )

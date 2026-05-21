@@ -23,7 +23,14 @@ from rich.table import Table
 
 from .classifier import classify
 from .ingest import ingest, probe
-from .models import AnalysisBundle, ClassificationBundle, SpeechAnalysis
+from .models import (
+    AnalysisBundle,
+    ClassificationBundle,
+    CutPlan,
+    CutPlanParams,
+    SpeechAnalysis,
+)
+from .planner import plan_cuts
 from .speech import Backend, ComputeType, WhisperModelSize, analyze
 
 app = typer.Typer(
@@ -187,6 +194,85 @@ def classify_cmd(
         f"(cache_read={result.cache_read_input_tokens})[/dim]"
     )
     console.print(f"[green]✓[/green] wrote classification → [bold]{out_path}[/bold]")
+
+
+@app.command("plan")
+def plan_cmd(
+    analysis_json: Annotated[
+        Path,
+        typer.Argument(
+            exists=True, dir_okay=False, readable=True,
+            help="Stage-2 analysis JSON (from `analyze`).",
+        ),
+    ],
+    classified: Annotated[
+        Path | None,
+        typer.Option(
+            "--classified",
+            help="Stage-3 classified JSON. Defaults to <analysis>.classified.json.",
+        ),
+    ] = None,
+    crossfade_ms: Annotated[int, typer.Option(help="Audio crossfade at each cut.")] = 20,
+    filler_pad_ms: Annotated[int, typer.Option(help="Pad around each filler cut.")] = 20,
+    default_breath_ms: Annotated[
+        int, typer.Option(help="Breath trim default when classifier didn't specify."),
+    ] = 150,
+    min_keep_ms: Annotated[
+        int, typer.Option(help="Drop keep-segments shorter than this."),
+    ] = 80,
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Where to write the plan JSON (default: alongside analysis)."),
+    ] = None,
+) -> None:
+    """Build the edit decision list (keep-segments) from analysis + classification."""
+    bundle = AnalysisBundle.model_validate_json(analysis_json.read_text())
+    cls_path = classified or analysis_json.with_suffix(".classified.json")
+    if not cls_path.exists():
+        console.print(
+            f"[red]✗[/red] Classification JSON not found at [bold]{cls_path}[/bold]. "
+            "Run `classify` first, or pass --classified."
+        )
+        raise typer.Exit(code=1)
+    cls_bundle = ClassificationBundle.model_validate_json(cls_path.read_text())
+
+    params = CutPlanParams(
+        crossfade_ms=crossfade_ms,
+        filler_pad_ms=filler_pad_ms,
+        default_breath_ms=default_breath_ms,
+        min_keep_ms=min_keep_ms,
+    )
+
+    with console.status("[bold cyan]Computing cut plan..."):
+        plan: CutPlan = plan_cuts(bundle.speech, cls_bundle, params=params)
+
+    out_path = out or analysis_json.with_suffix(".plan.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(plan.model_dump(mode="json"), indent=2))
+
+    cuts_by_kind: dict[str, int] = {}
+    removed_by_kind: dict[str, float] = {}
+    for c in plan.cuts:
+        cuts_by_kind[c.kind] = cuts_by_kind.get(c.kind, 0) + 1
+        removed_by_kind[c.kind] = (
+            removed_by_kind.get(c.kind, 0.0) + c.duration_removed
+        )
+    console.print(
+        f"[green]✓[/green] {plan.source_duration:.1f}s → "
+        f"[bold]{plan.output_duration:.1f}s[/bold]   "
+        f"saved [bold]{plan.time_saved_seconds:.1f}s[/bold] "
+        f"([bold]{plan.time_saved_pct:.1f}%[/bold])"
+    )
+    for kind in ("pause_cut", "pause_trim", "filler_cut", "retake_cut"):
+        if kind in cuts_by_kind:
+            console.print(
+                f"  [dim]{kind:11s}[/dim] {cuts_by_kind[kind]:>4d} ops, "
+                f"{removed_by_kind[kind]:.1f}s removed"
+            )
+    console.print(
+        f"[green]✓[/green] {len(plan.keeps)} keep-segments → "
+        f"[bold]{out_path}[/bold]"
+    )
 
 
 @app.command("ui")

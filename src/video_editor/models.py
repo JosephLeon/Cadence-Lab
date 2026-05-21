@@ -176,3 +176,76 @@ class ClassificationBundle(BaseModel):
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     schema_version: Literal[1] = 1
+
+
+# ─── Stage 4: cut planning ────────────────────────────────────────────────────
+
+CutKind = Literal["pause_cut", "pause_trim", "filler_cut", "retake_cut"]
+
+
+class KeepSegment(BaseModel):
+    """One contiguous time range of the source that survives editing.
+
+    The renderer (stage 5) concatenates these in order, applying short audio
+    crossfades at each boundary.
+    """
+
+    source_start: float
+    source_end: float
+
+    @property
+    def duration(self) -> float:
+        return self.source_end - self.source_start
+
+
+class CutOperation(BaseModel):
+    """One classifier-driven edit — for the audit log + review UI.
+
+    Multiple `CutOperation`s may collapse into a single keep-segment boundary
+    after interval merging (e.g. a retake that swallows several filler cuts
+    within it). The audit log preserves original intent regardless.
+    """
+
+    source_start: float
+    source_end: float
+    kind: CutKind
+    reason: str
+
+    @property
+    def duration_removed(self) -> float:
+        return self.source_end - self.source_start
+
+
+class CutPlanParams(BaseModel):
+    """Knobs that control how the classifier output becomes a concrete plan."""
+
+    crossfade_ms: int = 20
+    # Symmetric pad applied to every filler cut to avoid clipping adjacent
+    # words on either side — Whisper timestamps have ~50ms jitter.
+    filler_pad_ms: int = 20
+    # Used when a "trim" action has no explicit trim_to_ms (almost always breaths).
+    default_breath_ms: int = 150
+    # Drop any keep-segment shorter than this — it would be inaudible after
+    # crossfade and is almost certainly an artifact of overlapping cuts.
+    min_keep_ms: int = 80
+
+
+class CutPlan(BaseModel):
+    """Edit decision list — the contract between stage 4 and stage 5."""
+
+    source_duration: float
+    output_duration: float
+    keeps: list[KeepSegment]
+    cuts: list[CutOperation]  # audit log; original intents before merging
+    params: CutPlanParams
+    schema_version: Literal[1] = 1
+
+    @property
+    def time_saved_seconds(self) -> float:
+        return self.source_duration - self.output_duration
+
+    @property
+    def time_saved_pct(self) -> float:
+        if self.source_duration <= 0:
+            return 0.0
+        return 100.0 * self.time_saved_seconds / self.source_duration
