@@ -1,6 +1,6 @@
 """Streamlit UI for the AI Video Editor.
 
-Run via `video-editor ui` (the CLI shells out to `streamlit run`). The UI is a
+Run via `cadence-lab ui` (the CLI shells out to `streamlit run`). The UI is a
 thin wrapper over the same `probe` and `analyze` functions the CLI uses —
 nothing about the pipeline lives here, only display + form state.
 
@@ -23,19 +23,19 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from video_editor.classifier import classify as run_classify
-from video_editor.ingest import IngestError, ingest, probe
-from video_editor.models import (
+from cadence_lab.classifier import classify as run_classify
+from cadence_lab.ingest import IngestError, ingest, probe
+from cadence_lab.models import (
     AnalysisBundle,
     ClassificationBundle,
     CutPlan,
     CutPlanParams,
     SourceProbe,
 )
-from video_editor.planner import plan_cuts
-from video_editor.renderer import RenderError, render as run_render
-from video_editor.reviewer import apply_overrides, extract_audio_clip
-from video_editor.speech import analyze
+from cadence_lab.planner import plan_cuts
+from cadence_lab.renderer import RenderError, render as run_render
+from cadence_lab.reviewer import apply_overrides, extract_audio_clip
+from cadence_lab.speech import analyze
 
 load_dotenv()
 
@@ -110,7 +110,7 @@ for k, v in _DEFAULTS.items():
 
 def _save_upload(uploaded) -> Path:
     """Persist an uploaded file under a per-session temp dir."""
-    upload_dir = Path(tempfile.gettempdir()) / "video_editor_uploads"
+    upload_dir = Path(tempfile.gettempdir()) / "cadence_lab_uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     dest = upload_dir / uploaded.name
     with dest.open("wb") as f:
@@ -418,7 +418,7 @@ with src_tab_resume:
         else:
             # Persist uploads to a stable temp dir so the cascade loader can
             # find sibling files alongside the analysis JSON by name.
-            upload_dir = Path(tempfile.gettempdir()) / "video_editor_uploads"
+            upload_dir = Path(tempfile.gettempdir()) / "cadence_lab_uploads"
             upload_dir.mkdir(parents=True, exist_ok=True)
 
             saved_paths: list[Path] = []

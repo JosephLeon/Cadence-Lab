@@ -87,7 +87,7 @@ class SpeechAnalysis(BaseModel):
 
 
 class AnalysisBundle(BaseModel):
-    """The full output of `video-editor analyze`: ingest + speech analysis."""
+    """The full output of `cadence-lab analyze`: ingest + speech analysis."""
 
     ingest: IngestResult
     speech: SpeechAnalysis

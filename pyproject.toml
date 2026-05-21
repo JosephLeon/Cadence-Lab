@@ -1,12 +1,39 @@
 [project]
-name = "video-editor"
+name = "cadence-lab"
 version = "0.1.0"
-description = "Add your description here"
+description = "AI-driven semantic video editor — Claude Opus 4.7 decides what to cut, not amplitude thresholds. Built for YouTube creators."
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
-    { name = "JosephLeon", email = "joseph.leon.9@gmail.com" }
+    { name = "Joseph Leon", email = "887316+JosephLeon@users.noreply.github.com" }
 ]
 requires-python = ">=3.11"
+keywords = [
+    "video-editing",
+    "ai",
+    "claude",
+    "whisper",
+    "youtube",
+    "obs",
+    "ffmpeg",
+    "speech-to-text",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Multimedia :: Video :: Conversion",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "anthropic>=0.103.1",
     "faster-whisper>=1.2.1",
@@ -21,8 +48,13 @@ dependencies = [
     "typer>=0.25.1",
 ]
 
+[project.urls]
+Homepage = "https://github.com/JosephLeon/cadence-lab"
+Repository = "https://github.com/JosephLeon/cadence-lab"
+Issues = "https://github.com/JosephLeon/cadence-lab/issues"
+
 [project.scripts]
-video-editor = "video_editor:main"
+cadence-lab = "cadence_lab:main"
 
 [build-system]
 requires = ["uv_build>=0.11.15,<0.12.0"]

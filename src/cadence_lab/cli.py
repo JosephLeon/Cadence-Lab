@@ -2,11 +2,11 @@
 
 Currently exposes three commands:
 
-  video-editor probe <video>       — inspect audio tracks (use this to find the
+  cadence-lab probe <video>       — inspect audio tracks (use this to find the
                                      mic track before running `analyze`)
-  video-editor analyze <video>     — full ingest + speech analysis pass; writes
+  cadence-lab analyze <video>     — full ingest + speech analysis pass; writes
                                      a structured JSON bundle to disk
-  video-editor ui                  — launch the Streamlit UI
+  cadence-lab ui                  — launch the Streamlit UI
 """
 
 from __future__ import annotations

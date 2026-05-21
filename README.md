@@ -1,226 +1,336 @@
-# AI Video Editor
+# Cadence Lab
 
-A Python pipeline for auto-editing OBS-recorded YouTube videos. The first stage
-(this scaffold) handles **ingest** and **speech analysis** — probing the source,
-extracting the mic-only audio track, and producing word-level transcripts plus
-Silero VAD speech regions. Downstream stages (pause classification, cut planning,
-render) plug into the JSON bundle this stage writes.
+**An AI-driven semantic video editor for YouTube creators.** Drop in an OBS
+recording; Cadence Lab transcribes it with Whisper, asks Claude Opus 4.7 to
+classify every pause and filler word *in context* (not by amplitude), plans
+the cuts as pure interval algebra, lets you review them with per-cut audio
+playback, and renders a YouTube-ready MP4 with hardware-accelerated FFmpeg.
 
-## Status
+Built because every "auto-edit silence" tool I tried was a regex over the
+waveform. This one actually thinks about each pause.
 
-- ✅ Stage 1 — ingest (probe + mic-track extraction + 16 kHz mono normalization)
-- ✅ Stage 2 — speech analysis (Silero VAD + Whisper word timestamps, Groq backend)
-- ✅ Stage 3 — pause / filler / retake classification (Claude Opus 4.7)
-- ✅ Stage 4 — cut planner (interval algebra → edit decision list)
-- ✅ Stage 5 — renderer (FFmpeg, libx264 + AAC, per-segment audio fades)
-- ✅ Stage 6 — review UI (per-cut audio playback, accept/reject, re-plan)
+> 🎬 _Demo GIF / screenshot goes here — record once the UI is polished_
 
-## Prereqs
+---
 
-- macOS with Homebrew
-- `brew install ffmpeg uv`
+## Why this exists (and why it might interest you)
 
-## Setup
+Most automatic video editors are amplitude thresholders: anything quieter than
+−30 dB for longer than 0.4 s gets cut. That works for the easy half of the
+problem and butchers the other half — it cuts breaths to zero (which sounds
+robotic), removes dramatic pauses that were *intentional*, and treats every
+"um" the same as every "like." It also can't see retakes: when you flub a
+sentence and start over, an amplitude tool keeps both takes; a human editor
+keeps the second one.
+
+Cadence Lab is structured as a **6-stage pipeline** where the cut decisions
+are made by an LLM that has the full transcript in context. The novel bits
+are not in the FFmpeg or the Whisper integration — those are standard. The
+interesting parts are:
+
+- **Pause classification as a 7-way decision, not a boolean.** Each gap gets
+  labeled `filler` / `hesitation` / `breath` / `emphasis` / `pre_laughter`
+  / `transition` / `listening`, each with its own cut behavior. Breaths get
+  *trimmed to 150 ms*, not deleted — that's the difference between sounding
+  natural and sounding like an AI.
+- **Context-aware filler-word judgment.** "Like" used filler-style gets cut;
+  "like" used meaningfully ("nothing else *like* it") gets kept. The classifier
+  sees the surrounding words to decide.
+- **Retake detection.** If the speaker says "let me try that again" or
+  re-attempts the same sentence twice, the LLM flags the worse take.
+- **Structured outputs via `output_config.format`.** The Claude response is
+  constrained by a JSON schema so there's no regex parsing, no possibility of
+  malformed output — the cut planner consumes typed Pydantic models directly.
+- **Prompt caching on the classifier rubric.** The system prompt is wrapped in
+  `cache_control: {"type": "ephemeral"}` so re-running on more videos reads
+  the rubric from cache (~0.1× input cost on repeat).
+- **Hardware encode by default** (`h264_videotoolbox` on Apple Silicon),
+  with libx264 as an opt-in "archival" mode. Renders typically run 5–15×
+  faster than libx264 -preset slow for delivery-quality output that YouTube
+  re-encodes anyway.
+- **Per-classifier-item review UI with inline audio.** Listen to a ~3-second
+  clip around each proposed cut, override the classifier with a single click,
+  re-plan instantly. Override decisions flow back through `apply_overrides()`
+  → `plan_cuts()` so the same code path serves both the initial plan and the
+  refined plan.
+
+If you're building LLM-augmented pipelines and want a reference for
+production-quality choices around structured outputs, prompt caching, multi-stage
+data contracts, and progressive disclosure UI — this is a real working example
+of all of those.
+
+---
+
+## Pipeline
+
+```
+                                    JSON contracts between stages
+                                                ▼
+ source.mov  ──►  ┌─────────────┐  ──►  ┌──────────────┐  ──►  ┌────────────────┐
+                  │  1. Ingest  │       │ 2. Analyze   │       │ 3. Classify    │
+                  │             │       │              │       │                │
+                  │ ffprobe +   │       │ Silero VAD + │       │ Claude Opus    │
+                  │ mic-track   │       │ Whisper      │       │ 4.7 — pause +  │
+                  │ extraction  │       │ (Groq cloud  │       │ filler classes │
+                  │             │       │  or local)   │       │ + retakes      │
+                  └─────────────┘       └──────────────┘       └────────────────┘
+                                                                       │
+                  ┌─────────────┐       ┌──────────────┐       ┌──────────────┐
+                  │ 6. Review   │ ◄──── │ 5. Render    │ ◄──── │ 4. Plan      │
+                  │             │       │              │       │              │
+                  │ per-cut     │       │ FFmpeg       │       │ Interval     │
+                  │ audio +     │       │ filter_      │       │ algebra:     │
+                  │ accept /    │       │ complex      │       │ classifier   │
+                  │ reject /    │       │ (HW encode   │       │ output →     │
+                  │ re-plan     │       │  by default) │       │ keep-segments│
+                  └─────────────┘       └──────────────┘       └──────────────┘
+                       ▲                                              │
+                       └──────────── re-plan with overrides ◄─────────┘
+```
+
+Each stage writes a structured JSON file. The next stage reads it. You can
+stop at any stage, edit the JSON by hand if you want, and resume.
+
+```
+recording.mov                  ← source
+recording.analysis.json        ← stage 2 output: probe + transcript + VAD
+recording.classified.json      ← stage 3 output: per-pause/filler classifications
+recording.plan.json            ← stage 4 output: keep-segments + audit log
+recording.edited.mp4           ← stage 5 output: the final video
+```
+
+---
+
+## Quickstart
+
+### Requirements
+
+- macOS (Apple Silicon recommended — hardware video encoder) or Linux
+- Python 3.11+
+- `ffmpeg` and `uv` on `PATH`
 
 ```sh
+brew install ffmpeg uv
+```
+
+### Setup
+
+```sh
+git clone https://github.com/JosephLeon/cadence-lab.git
+cd cadence-lab
 uv sync
-cp .env.example .env
-# then edit .env and paste your GROQ_API_KEY
+cp .env.example .env       # then add your keys
 ```
 
-That creates `.venv/` and installs everything in `pyproject.toml`.
+You need two API keys:
 
-### API keys
+- **`GROQ_API_KEY`** — for transcription. Whisper-large-v3 hosted by Groq runs
+  at ~30× realtime for ~$0.05 per 30 minutes of audio. Get one at
+  <https://console.groq.com/keys>.
+- **`ANTHROPIC_API_KEY`** — for Claude Opus 4.7 classification. ~$0.50–$1.50
+  per 30-minute video at default settings. Get one at
+  <https://console.anthropic.com/settings/keys>.
 
-The default pipeline uses two hosted APIs:
-
-- **Groq** for transcription (whisper-large-v3 at ~30× realtime)
-- **Anthropic** for pause classification (Claude Opus 4.7)
-
-Copy `.env.example` to `.env` and fill in both keys. Expected per-video cost
-at default settings is well under a dollar (Groq ~$0.05, Claude ~$0.50–$1).
-
-### Transcription backends
-
-Two backends are available; pick at runtime via `--backend` or the UI dropdown.
-
-- **`groq` (default)** — uploads audio to Groq's hosted `whisper-large-v3`
-  endpoint. ~30× realtime, same model weights as local. Requires
-  `GROQ_API_KEY` (get one at <https://console.groq.com/keys>). 25 MB upload
-  limit — we transcode to FLAC first, so this comfortably covers ~50 min of
-  speech per video.
-- **`local`** — runs faster-whisper on Apple Silicon CPU. Slow (~5–10× slower
-  than realtime for `large-v3`) but fully offline. The first `local` run
-  downloads the model (~3 GB) into the HuggingFace cache.
-
-## Usage
-
-### Option A — UI (recommended)
+### Launch
 
 ```sh
-uv run video-editor ui
+uv run cadence-lab ui
 ```
 
-Opens a Streamlit app at <http://localhost:8501>.
+Opens at <http://localhost:8501>. Drop a video in, walk through sections 1–11.
+Already have JSON artifacts from a previous run? Use the **"Resume from JSON"**
+tab in section 1 to skip straight to the stage you left off at.
 
-**Resuming an existing project:** if you already have the JSON artifacts from a
-previous run (`*.analysis.json`, `*.classified.json`, `*.plan.json`), use the
-**"Resume from JSON"** tab in Section 1. Point at the analysis JSON and it
-auto-discovers everything alongside it — you land on whichever section
-corresponds to where you left off (skip straight to Review or Render).
+### Or use the CLI
 
-**New project, full flow:**
-
-1. **Source** — drop a file in the uploader, or paste a path on disk (use the
-   path tab for large OBS recordings; the uploader allows up to 4 GB but path
-   is faster).
-2. **Probe** — auto-runs on selection; shows duration, resolution, fps, VFR
-   flag, and the full audio-track table. Use this to identify the mic track.
-3. **Analyze** — pick the mic track, Whisper model, and compute precision, then
-   run. Results show language, segment/word/VAD counts, an expandable
-   transcript with per-word timestamps, the VAD region table, and a download
-   button for the JSON bundle.
-
-### Option B — CLI
-
-Each stage can run independently if its input JSON already exists. For
-example, if you already have an `analysis.json` and just want to render:
+Each stage is a separate subcommand; they're chained by JSON output.
 
 ```sh
-uv run video-editor render path/to/recording.analysis.json   # uses plan.json alongside
+uv run cadence-lab probe   recording.mov                    # list audio tracks
+uv run cadence-lab analyze recording.mov                    # → analysis.json
+uv run cadence-lab classify recording.analysis.json         # → classified.json
+uv run cadence-lab plan    recording.analysis.json          # → plan.json
+uv run cadence-lab render  recording.analysis.json          # → edited.mp4
 ```
 
-The full one-stage-at-a-time flow:
+The `render` command uses hardware encoding by default on Apple Silicon
+(`h264_videotoolbox`, ~5–15× faster than libx264 with quality YouTube can't
+distinguish after its own re-encode). Pass `--encoder libx264` for an
+archival CPU encode at `-preset slow -crf 18`.
 
-#### 1. Probe a source video
+---
 
-OBS recordings often have multiple audio tracks (mic + desktop audio on separate
-streams). Use `probe` to see which track is which:
+## Architecture deep-dive
 
-```sh
-uv run video-editor probe path/to/recording.mov
-```
+### Stage 1 — Ingest ([`ingest.py`](src/cadence_lab/ingest.py))
 
-You'll get a table of audio tracks with index, codec, sample rate, and (if OBS
-labeled them) titles. Pick the index of the mic track for the next step.
+Probes the source with `ffprobe`, detects variable frame rate, and extracts
+the mic track alone as 16 kHz mono PCM WAV. **Mic-only matters:** OBS records
+mic and desktop audio on separate tracks; if the analyzer sees desktop audio,
+game sounds or background music will mask the speech pauses we're trying to
+classify.
 
-#### 2. Analyze
+### Stage 2 — Speech analysis ([`speech.py`](src/cadence_lab/speech.py) + [`backends.py`](src/cadence_lab/backends.py))
 
-```sh
-uv run video-editor analyze path/to/recording.mov --mic-track 0
-```
+Two parallel signals on the mic WAV:
 
-#### 3. Classify pauses / fillers / retakes (stage 3)
+- **Silero VAD** produces frame-accurate "speech vs not" boundaries. Used by
+  later stages to know exactly where words begin and end — independent of
+  what the transcriber thinks was said.
+- **Whisper large-v3** produces the transcript with per-word timestamps. The
+  default backend is **Groq** (hosted, ~30× realtime, ~$0.05/video); the
+  local backend is faster-whisper on CPU as a fallback.
 
-```sh
-uv run video-editor classify path/to/recording.analysis.json
-```
+The Groq path transcodes the mic WAV to Opus 64 kbps before upload
+(lossless-for-Whisper, ~5× smaller than FLAC). For audio that exceeds Groq's
+25 MB upload limit, it splits at silence boundaries detected by `ffmpeg
+silencedetect`, transcribes each chunk independently, and stitches the
+timestamps back together.
 
-Sends the transcript + per-word timestamps to Claude Opus 4.7 with a frozen
-classification rubric. Output: `recording.classified.json` containing per-pause
-category + action + reason, per-filler-candidate cut/keep, and detected retakes
-(speaker repeated themselves). Requires `ANTHROPIC_API_KEY` in `.env`.
+### Stage 3 — Classification ([`classifier.py`](src/cadence_lab/classifier.py))
 
-Useful flags:
-- `--min-pause-ms 250` (default) — gaps below this aren't classified
-- `--out path/file.json` — override output location
+This is the LLM bit. The pre-processor:
+1. Computes every word-to-word gap ≥ 250 ms (assigns each a stable ID).
+2. Scans the transcript for candidate filler tokens (`um`, `uh`, `like`,
+   `actually`, etc., each with a stable ID).
+3. Builds an annotated transcript where pauses and filler candidates are
+   marked inline:
+   ```
+   [00:00] Hello «P:0 (0.52s)» everyone «F:0:"um"» welcome to the show.
+   ```
 
-#### 4. Build the cut plan (stage 4)
+Then a single call to Claude Opus 4.7 with:
+- `thinking: {"type": "adaptive"}` + `effort: "high"` — the classifier
+  benefits from reasoning across the full transcript
+- `output_config: {format: {type: "json_schema", schema: ...}}` — Claude is
+  constrained to produce JSON matching our schema; no regex, no parsing
+  fragility
+- `cache_control: {"type": "ephemeral"}` on the system prompt with the
+  classification rubric — subsequent videos read the rubric from cache
 
-```sh
-uv run video-editor plan path/to/recording.analysis.json
-```
+The output is per-pause `{category, action, reason}`, per-filler
+`{action, reason}`, plus detected retakes.
 
-Pure interval algebra — no API calls, no network, no video touched. Reads the
-analysis JSON + the matching `.classified.json` (auto-discovered alongside) and
-produces `recording.plan.json` containing:
+### Stage 4 — Cut planner ([`planner.py`](src/cadence_lab/planner.py))
 
-- **`keeps`**: ordered list of source-video time ranges that survive editing
-- **`cuts`**: audit log of every classifier-driven cut (kind + reason)
-- **`params`**: the crossfade / breath / pad values used
-- summary stats (source duration, output duration, time saved)
+**Pure interval algebra, no API, no video touched.** Each classifier "cut" or
+"trim" decision contributes one or more removal intervals; the planner merges
+overlapping intervals, takes the complement in `[0, duration]` to get
+keep-segments, drops slivers shorter than `min_keep_ms`. The original cut-op
+list is preserved as an audit log so the review UI can show the *original
+intent* even after merging (e.g. a retake that swallowed three filler cuts
+within it).
 
-The plan is the contract for the renderer (stage 5).
+### Stage 5 — Renderer ([`renderer.py`](src/cadence_lab/renderer.py))
 
-Useful flags:
-- `--crossfade-ms 20` — audio crossfade at every cut boundary
-- `--filler-pad-ms 20` — buffer around each filler cut (Whisper jitter)
-- `--default-breath-ms 150` — breath trim when classifier didn't specify
-- `--min-keep-ms 80` — drop sliver keeps shorter than this
+FFmpeg `filter_complex` building one trim per keep-segment for video and one
+trim+fade-in+fade-out per keep-segment for audio. Per-segment fades (rather
+than `acrossfade`) avoid the time offset `acrossfade` introduces, so video
+and audio stay frame-aligned without any sync correction. The whole filter
+graph is written to a temp file via `-filter_complex_script` to avoid
+command-line length limits with hundreds of cuts.
 
-#### 5. Review & refine (stage 6, UI only)
+Encoder defaults: **`h264_videotoolbox`** if available (Apple Silicon hardware
+encoder) at `-q:v 65 -realtime 0 -prio_speed 0 -profile:v high`, else falls
+back to libx264. Pass `encoder="libx264"` explicitly to force the slow CPU
+encode for an archival master.
 
-The Streamlit UI has a **Review & refine** section between *Plan results* and
-*Render*. For each classifier decision, listen to a ~3-second mic clip around
-the cut, override the action with one click, then **Apply changes** to
-re-plan. The render section picks up the refined plan automatically.
+### Stage 6 — Review UI ([`reviewer.py`](src/cadence_lab/reviewer.py) + Streamlit section 9)
 
-- Filters: pauses only / fillers only / retakes only / my overrides only / everything
-- Per-row audio playback (cached, fast on revisit)
-- 20 rows per page with prev/next
-- Pending-overrides counter + reset button
-- Live preview of how the override set would change the output duration
+For each classifier decision, a row with:
+- Timestamp + duration
+- Transcript context (`±6` words around the cut)
+- Inline MP3 clip extracted lazily from the mic WAV (cached)
+- Radio buttons for the override action
 
-This step is optional. If the classifier got everything right, skip straight
-from Plan to Render.
+User overrides are stored as `{(kind, source_id): override_value}` in
+session state. Clicking "Apply changes" runs `apply_overrides()` on the
+classification, then `plan_cuts()` on the modified version — pure functional
+flow, no mutation of the original artifacts.
 
-#### 6. Render the MP4 (stage 5)
+---
 
-```sh
-uv run video-editor render path/to/recording.analysis.json
-```
+## Cost per video
 
-Reads the plan JSON alongside, plus the source video path from the analysis,
-and produces `recording.edited.mp4` — libx264 + AAC with per-segment audio
-fade-in/out at every cut for click-free joins.
+At default settings, end-to-end for a 30-minute source video:
 
-Useful flags:
-- `--encoder auto` (default) — hardware-accelerated h264_videotoolbox on
-  Apple Silicon (10–30× faster than libx264). Falls back to libx264 if
-  unavailable. Use `--encoder libx264` for an archival-quality CPU master
-  (`-preset slow -crf 18`, much slower).
-- `--audio-bitrate 192k`
-- `--audio-track N` — override which audio track to render (defaults to the
-  mic track picked at ingest time)
-- `--source PATH` — override source if it's moved
-- `--out PATH` — output location
+| Stage | What | Cost |
+|---|---|---|
+| 2 — Transcription | Groq whisper-large-v3 | ~$0.05 |
+| 3 — Classification | Claude Opus 4.7, ~25 K input + ~10 K output tokens | $0.50–$1.50 |
+| 4 — Planning | Local CPU | $0 |
+| 5 — Render | Local CPU/GPU | $0 |
+| **Total** | | **~$0.55–$1.55** |
 
-Writes a structured JSON bundle (`recording.analysis.json`) containing:
+The local backend (`faster-whisper`) is offline + free but ~5–10× slower than
+Groq; useful if you don't want audio leaving your machine.
 
-- the source probe (codecs, resolution, fps, VFR flag, all audio tracks)
-- the path to the normalized mic WAV
-- Silero VAD speech regions
-- Whisper segments with per-word timestamps and confidence
+---
 
-Useful flags:
-
-- `--model large-v3` (default) | `medium` | `small` — trade speed for accuracy
-- `--compute-type int8` (default, Apple Silicon friendly) | `float16` | `float32`
-- `--language en` to skip auto-detect when you know the language
-- `--out custom/path.json` to control output location
-
-## Design notes
-
-- The mic track is extracted alone for analysis — desktop audio would mask
-  speech pauses, which is the whole point.
-- VAD and transcription are kept independent: Silero gives precise speech
-  boundaries; Whisper gives words. The cut planner (next stage) uses both.
-- The JSON bundle is the contract between stages. Anything downstream — pause
-  classifier, cut planner, renderer, review UI — reads this file and nothing else.
-
-## Layout
+## Project layout
 
 ```
-src/video_editor/
+src/cadence_lab/
 ├── cli.py        # typer CLI: probe / analyze / classify / plan / render / ui
-├── ui.py         # streamlit app (10 sections, full pipeline + review)
-├── ingest.py     # ffprobe + ffmpeg extraction
+├── ui.py         # streamlit app (11 sections, full pipeline + review)
+├── ingest.py     # ffprobe + ffmpeg mic-track extraction
 ├── speech.py     # Silero VAD + transcription dispatch
-├── backends.py   # groq + local (faster-whisper) transcription backends
+├── backends.py   # Groq + local (faster-whisper) backends, with chunking
 ├── classifier.py # pause / filler / retake classifier (Claude Opus 4.7)
 ├── planner.py    # interval algebra → CutPlan (no API, no video)
-├── renderer.py   # FFmpeg filter_complex (trim + concat + fades) → MP4
+├── renderer.py   # FFmpeg filter_complex (videotoolbox or libx264)
 ├── reviewer.py   # apply_overrides() + per-cut audio clip extraction
-├── models.py     # pydantic data models (JSON contract)
+├── models.py     # pydantic data models (the JSON contract)
 └── __init__.py
 ```
+
+---
+
+## What's deferred (and why)
+
+A few things in the original architecture sketch that I haven't built:
+
+- **Screen-change snapping.** The plan was: sample frames every ~250 ms,
+  detect "screen change moments" via perceptual hash, snap each keep-segment
+  boundary to the nearest one within ±500 ms so cuts feel intentional. Worth
+  doing for screen-recording content. Currently cuts land on word-aligned
+  positions which is already pretty clean.
+- **Style-profile aggregation.** The review UI's accept/reject decisions die
+  with the session today. The architecture called for these to feed a
+  per-channel style profile over time. Useful once you've reviewed enough
+  videos to have a feel for what patterns to learn.
+- **Stream-copy where possible.** The original spec said "stream-copy
+  untouched regions, re-encode only across cut boundaries." With hardware
+  encode by default, the speedup isn't worth the complexity.
+- **Bulk operations in review.** Currently you reject cuts one at a time.
+  "Reject all filler cuts under 400 ms" type operations would be useful once
+  you have 200+ cuts to review.
+
+---
+
+## Tech stack
+
+- **Python 3.11+**, [`uv`](https://github.com/astral-sh/uv) for dependencies
+- **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python)** — Claude Opus 4.7
+  with adaptive thinking, structured outputs via `output_config.format`,
+  prompt caching
+- **[Groq SDK](https://github.com/groq/groq-python)** — hosted whisper-large-v3
+- **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** — local fallback transcription
+- **[silero-vad](https://github.com/snakers4/silero-vad)** — voice activity detection
+- **[FFmpeg](https://ffmpeg.org/)** — all media manipulation; `h264_videotoolbox` or `libx264`
+- **[Pydantic](https://docs.pydantic.dev/)** v2 — typed data models for the JSON contracts
+- **[Typer](https://typer.tiangolo.com/)** — CLI
+- **[Streamlit](https://streamlit.io/)** — admin / review UI (custom dark theme + CSS polish)
+
+---
+
+## License
+
+[MIT](LICENSE). Use it for whatever you want — personal, commercial,
+remixing, training your own model on its outputs. Attribution appreciated
+but not required.
+
+## Contributing
+
+Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the short
+guidelines.
