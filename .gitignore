@@ -15,6 +15,7 @@ dist/
 
 # Project outputs and intermediates
 output/
+files/
 *.analysis.json
 *.mic.16k.wav
 
