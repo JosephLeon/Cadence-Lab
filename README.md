@@ -24,11 +24,24 @@ render) plug into the JSON bundle this stage writes.
 
 ```sh
 uv sync
+cp .env.example .env
+# then edit .env and paste your GROQ_API_KEY
 ```
 
-That creates `.venv/` and installs everything in `pyproject.toml`. The first run
-of `analyze` will download the Whisper `large-v3` model (~3 GB) into the local
-HuggingFace cache.
+That creates `.venv/` and installs everything in `pyproject.toml`.
+
+### Transcription backends
+
+Two backends are available; pick at runtime via `--backend` or the UI dropdown.
+
+- **`groq` (default)** — uploads audio to Groq's hosted `whisper-large-v3`
+  endpoint. ~30× realtime, same model weights as local. Requires
+  `GROQ_API_KEY` (get one at <https://console.groq.com/keys>). 25 MB upload
+  limit — we transcode to FLAC first, so this comfortably covers ~50 min of
+  speech per video.
+- **`local`** — runs faster-whisper on Apple Silicon CPU. Slow (~5–10× slower
+  than realtime for `large-v3`) but fully offline. The first `local` run
+  downloads the model (~3 GB) into the HuggingFace cache.
 
 ## Usage
 
@@ -100,7 +113,8 @@ src/video_editor/
 ├── cli.py        # typer CLI: `probe`, `analyze`, `ui`
 ├── ui.py         # streamlit app
 ├── ingest.py     # ffprobe + ffmpeg extraction
-├── speech.py     # Silero VAD + faster-whisper
+├── speech.py     # Silero VAD + transcription dispatch
+├── backends.py   # groq + local (faster-whisper) transcription backends
 ├── models.py     # pydantic data models (JSON contract)
 └── __init__.py
 ```

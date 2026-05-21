@@ -23,7 +23,7 @@ from rich.table import Table
 
 from .ingest import ingest, probe
 from .models import AnalysisBundle
-from .speech import ComputeType, WhisperModelSize, analyze
+from .speech import Backend, ComputeType, WhisperModelSize, analyze
 
 app = typer.Typer(
     add_completion=False,
@@ -75,8 +75,13 @@ def analyze_cmd(
     mic_track: Annotated[
         int, typer.Option("--mic-track", "-m", help="Audio track index to treat as the mic.")
     ] = 0,
+    backend: Annotated[
+        Backend,
+        typer.Option(help="Transcription backend: groq (hosted, fast) or local (faster-whisper)."),
+    ] = "groq",
     model: Annotated[
-        WhisperModelSize, typer.Option(help="Whisper model size.")
+        WhisperModelSize,
+        typer.Option(help="Whisper model size (local backend only)."),
     ] = "large-v3",
     compute_type: Annotated[
         ComputeType,
@@ -104,9 +109,14 @@ def analyze_cmd(
         f"[dim]{ing.normalized_audio_path}[/dim]"
     )
 
-    with console.status(f"[bold cyan]Transcribing with Whisper {model} ({compute_type})..."):
+    label = (
+        f"Groq whisper-large-v3" if backend == "groq"
+        else f"Whisper {model} ({compute_type}) [local]"
+    )
+    with console.status(f"[bold cyan]Transcribing with {label}..."):
         speech = analyze(
             audio_path=ing.normalized_audio_path,
+            backend=backend,
             model_size=model,
             compute_type=compute_type,
             language=language,

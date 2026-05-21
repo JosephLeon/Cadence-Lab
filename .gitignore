@@ -21,6 +21,10 @@ output/
 # Streamlit — keep project-wide config.toml, ignore per-user credentials
 .streamlit/credentials.toml
 
+# Secrets — load via python-dotenv from .env (template is .env.example)
+.env
+.env.local
+
 # Models cached by faster-whisper / huggingface (if pointed at the repo)
 .cache/
 

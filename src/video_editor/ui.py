@@ -16,14 +16,18 @@ Three panels, top to bottom:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
 
 from video_editor.ingest import IngestError, ingest, probe
 from video_editor.models import AnalysisBundle, SourceProbe
 from video_editor.speech import analyze
+
+load_dotenv()
 
 st.set_page_config(page_title="AI Video Editor", page_icon="🎬", layout="wide")
 
@@ -218,18 +222,39 @@ if st.session_state.probe is not None:
         ) or None
 
     with cfg_right:
-        model_size = st.selectbox(
-            "Whisper model",
-            options=["large-v3", "medium", "small", "base", "tiny"],
+        backend = st.selectbox(
+            "Transcription backend",
+            options=["groq", "local"],
             index=0,
-            help="large-v3 = best quality, slowest on CPU.",
+            help=(
+                "groq = whisper-large-v3 hosted on Groq (~30× realtime, requires "
+                "GROQ_API_KEY). local = faster-whisper on Apple Silicon CPU "
+                "(slow, offline)."
+            ),
         )
-        compute_type = st.selectbox(
-            "Compute precision",
-            options=["int8", "int8_float16", "float16", "float32"],
-            index=0,
-            help="int8 is the practical Apple Silicon CPU default.",
-        )
+        if backend == "groq":
+            if os.getenv("GROQ_API_KEY"):
+                st.caption(":green[✓ GROQ_API_KEY detected]")
+            else:
+                st.warning(
+                    "GROQ_API_KEY not set. Add it to `.env` (see `.env.example`) "
+                    "and restart, or switch to the local backend."
+                )
+            model_size = "large-v3"
+            compute_type = "int8"  # ignored by groq backend, kept for shape
+        else:
+            model_size = st.selectbox(
+                "Whisper model",
+                options=["large-v3", "medium", "small", "base", "tiny"],
+                index=0,
+                help="large-v3 = best quality, slowest on CPU.",
+            )
+            compute_type = st.selectbox(
+                "Compute precision",
+                options=["int8", "int8_float16", "float16", "float32"],
+                index=0,
+                help="int8 is the practical Apple Silicon CPU default.",
+            )
 
     run = st.button("▶ Run analysis", type="primary")
     if run:
@@ -261,6 +286,7 @@ if st.session_state.probe is not None:
 
             speech = analyze(
                 audio_path=ing.normalized_audio_path,
+                backend=backend,
                 model_size=model_size,
                 compute_type=compute_type,
                 language=language,
