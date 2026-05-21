@@ -31,6 +31,7 @@ from .models import (
     SpeechAnalysis,
 )
 from .planner import plan_cuts
+from .renderer import render
 from .speech import Backend, ComputeType, WhisperModelSize, analyze
 
 app = typer.Typer(
@@ -272,6 +273,102 @@ def plan_cmd(
     console.print(
         f"[green]✓[/green] {len(plan.keeps)} keep-segments → "
         f"[bold]{out_path}[/bold]"
+    )
+
+
+@app.command("render")
+def render_cmd(
+    analysis_json: Annotated[
+        Path,
+        typer.Argument(
+            exists=True, dir_okay=False, readable=True,
+            help="Stage-2 analysis JSON (from `analyze`).",
+        ),
+    ],
+    plan_json: Annotated[
+        Path | None,
+        typer.Option(
+            "--plan",
+            help="Stage-4 plan JSON. Defaults to <analysis>.plan.json.",
+        ),
+    ] = None,
+    source: Annotated[
+        Path | None,
+        typer.Option(
+            "--source",
+            help="Override source video path (default: read from analysis JSON).",
+        ),
+    ] = None,
+    audio_track: Annotated[
+        int | None,
+        typer.Option(
+            "--audio-track",
+            help="Audio track index (default: same as ingest's mic track).",
+        ),
+    ] = None,
+    crf: Annotated[
+        int,
+        typer.Option(help="libx264 CRF — lower = better. 18 ≈ visually lossless."),
+    ] = 18,
+    preset: Annotated[
+        str,
+        typer.Option(help="libx264 preset: ultrafast/superfast/.../slow/veryslow."),
+    ] = "slow",
+    audio_bitrate: Annotated[str, typer.Option(help="AAC bitrate.")] = "192k",
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Output MP4 path (default: <source>.edited.mp4)."),
+    ] = None,
+) -> None:
+    """Render the cut plan into a YouTube-ready MP4."""
+    bundle = AnalysisBundle.model_validate_json(analysis_json.read_text())
+    plan_path = plan_json or analysis_json.with_suffix(".plan.json")
+    if not plan_path.exists():
+        console.print(
+            f"[red]✗[/red] Plan JSON not found at [bold]{plan_path}[/bold]. "
+            "Run `plan` first, or pass --plan."
+        )
+        raise typer.Exit(code=1)
+    plan = CutPlan.model_validate_json(plan_path.read_text())
+
+    source_path = (source or bundle.ingest.source.path).expanduser()
+    if not source_path.exists():
+        console.print(f"[red]✗[/red] Source not found at [bold]{source_path}[/bold].")
+        raise typer.Exit(code=1)
+
+    track = audio_track if audio_track is not None else bundle.ingest.mic_track_index
+    out_path = out or source_path.with_suffix(".edited.mp4")
+
+    console.print(
+        f"[bold]Rendering[/bold] {plan.source_duration:.1f}s → {plan.output_duration:.1f}s "
+        f"(saved {plan.time_saved_pct:.1f}%) from {len(plan.keeps)} segments"
+    )
+
+    last_pct = -1
+    def cli_progress(frac: float, msg: str) -> None:
+        nonlocal last_pct
+        pct = int(frac * 100)
+        # Only emit when percentage advances or final message, to avoid spam.
+        if pct > last_pct or frac >= 1.0:
+            console.print(f"  [dim]{msg}[/dim]")
+            last_pct = pct
+
+    render(
+        source=source_path,
+        plan=plan,
+        output_path=out_path,
+        audio_track_index=track,
+        video_crf=crf,
+        video_preset=preset,
+        audio_bitrate=audio_bitrate,
+        progress=cli_progress,
+    )
+
+    size_mb = out_path.stat().st_size / 1_048_576
+    console.print(
+        f"[green]✓[/green] [bold]{out_path}[/bold] "
+        f"({size_mb:.1f} MB, {plan.output_duration:.1f}s, "
+        f"libx264 {preset} CRF {crf})"
     )
 
 

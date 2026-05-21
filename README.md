@@ -12,7 +12,7 @@ render) plug into the JSON bundle this stage writes.
 - ✅ Stage 2 — speech analysis (Silero VAD + Whisper word timestamps, Groq backend)
 - ✅ Stage 3 — pause / filler / retake classification (Claude Opus 4.7)
 - ✅ Stage 4 — cut planner (interval algebra → edit decision list)
-- ⏳ Stage 5 — renderer (FFmpeg, stream-copy where possible, audio crossfades)
+- ✅ Stage 5 — renderer (FFmpeg, libx264 + AAC, per-segment audio fades)
 - ⏳ Stage 6 — review UI
 
 ## Prereqs
@@ -131,6 +131,26 @@ Useful flags:
 - `--default-breath-ms 150` — breath trim when classifier didn't specify
 - `--min-keep-ms 80` — drop sliver keeps shorter than this
 
+#### 5. Render the MP4 (stage 5)
+
+```sh
+uv run video-editor render path/to/recording.analysis.json
+```
+
+Reads the plan JSON alongside, plus the source video path from the analysis,
+and produces `recording.edited.mp4` — libx264 + AAC with per-segment audio
+fade-in/out at every cut for click-free joins.
+
+Useful flags:
+- `--crf 18` (default) — libx264 quality. Lower = better (14–17 archival,
+  18–20 near-lossless, 23 YouTube-default-ish)
+- `--preset slow` (default) — quality/speed tradeoff: `ultrafast` → `veryslow`
+- `--audio-bitrate 192k`
+- `--audio-track N` — override which audio track to render (defaults to the
+  mic track picked at ingest time)
+- `--source PATH` — override source if it's moved
+- `--out PATH` — output location
+
 Writes a structured JSON bundle (`recording.analysis.json`) containing:
 
 - the source probe (codecs, resolution, fps, VFR flag, all audio tracks)
@@ -158,13 +178,14 @@ Useful flags:
 
 ```
 src/video_editor/
-├── cli.py        # typer CLI: `probe`, `analyze`, `classify`, `plan`, `ui`
+├── cli.py        # typer CLI: probe / analyze / classify / plan / render / ui
 ├── ui.py         # streamlit app
 ├── ingest.py     # ffprobe + ffmpeg extraction
 ├── speech.py     # Silero VAD + transcription dispatch
 ├── backends.py   # groq + local (faster-whisper) transcription backends
 ├── classifier.py # pause / filler / retake classifier (Claude Opus 4.7)
 ├── planner.py    # interval algebra → CutPlan (no API, no video)
+├── renderer.py   # FFmpeg filter_complex (trim + concat + fades) → MP4
 ├── models.py     # pydantic data models (JSON contract)
 └── __init__.py
 ```

@@ -33,6 +33,7 @@ from video_editor.models import (
     SourceProbe,
 )
 from video_editor.planner import plan_cuts
+from video_editor.renderer import RenderError, render as run_render
 from video_editor.speech import analyze
 
 load_dotenv()
@@ -50,6 +51,7 @@ _DEFAULTS: dict[str, object] = {
     "classification_json_path": None,  # Path | None
     "cut_plan": None,                # CutPlan | None
     "plan_json_path": None,          # Path | None
+    "rendered_path": None,           # Path | None
 }
 for k, v in _DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -74,6 +76,7 @@ def _reset_downstream() -> None:
     st.session_state.classification_json_path = None
     st.session_state.cut_plan = None
     st.session_state.plan_json_path = None
+    st.session_state.rendered_path = None
 
 
 def _render_probe(p: SourceProbe) -> None:
@@ -635,3 +638,110 @@ if st.session_state.cut_plan is not None:
         file_name=(st.session_state.plan_json_path or Path("plan.json")).name,
         mime="application/json",
     )
+
+# ─── 9. Render (Stage 5) ──────────────────────────────────────────────────────
+if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is not None:
+    st.header("9. Render to MP4")
+    st.caption(
+        "Executes the cut plan against the source video. libx264 + AAC, "
+        "audio fade-in/out at every cut for click-free joins. Slow but quality-first."
+    )
+
+    plan_now: CutPlan = st.session_state.cut_plan
+    bundle_now = st.session_state.analysis_bundle
+    default_track = bundle_now.ingest.mic_track_index
+    n_tracks = len(bundle_now.ingest.source.audio_tracks)
+
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        crf = st.slider(
+            "Video quality (CRF)",
+            min_value=14, max_value=28, value=18, step=1,
+            help="Lower = better quality, bigger file. 18 ≈ visually lossless; "
+                 "23 is YouTube default-ish.",
+        )
+        preset = st.selectbox(
+            "Encoder preset (speed vs compression)",
+            options=[
+                "ultrafast", "superfast", "veryfast", "faster",
+                "fast", "medium", "slow", "slower", "veryslow",
+            ],
+            index=6,  # slow
+            help="Slower presets compress more efficiently at the same quality.",
+        )
+    with rc2:
+        audio_bitrate = st.selectbox(
+            "Audio bitrate (AAC)",
+            options=["128k", "160k", "192k", "256k", "320k"],
+            index=2,
+        )
+        audio_track = st.selectbox(
+            "Audio track to render",
+            options=list(range(n_tracks)),
+            index=min(default_track, n_tracks - 1),
+            help=f"Default ({default_track}) is the mic track used for analysis.",
+        )
+
+    if st.button("▶ Render MP4", type="primary"):
+        source_path = st.session_state.source_path
+        out_path = source_path.with_suffix(".edited.mp4")
+
+        progress_bar = st.progress(0.0)
+        status_line = st.empty()
+
+        def on_render_progress(frac: float, msg: str) -> None:
+            progress_bar.progress(min(max(frac, 0.0), 1.0))
+            status_line.markdown(f"**{msg}**")
+
+        try:
+            run_render(
+                source=source_path,
+                plan=plan_now,
+                output_path=out_path,
+                audio_track_index=audio_track,
+                video_crf=crf,
+                video_preset=preset,
+                audio_bitrate=audio_bitrate,
+                progress=on_render_progress,
+            )
+        except RenderError as e:
+            progress_bar.empty()
+            status_line.empty()
+            st.error(f"Render failed:\n\n```\n{e}\n```")
+        except Exception as e:
+            progress_bar.empty()
+            status_line.empty()
+            st.exception(e)
+        else:
+            st.session_state.rendered_path = out_path
+            progress_bar.progress(1.0)
+            status_line.empty()
+            size_mb = out_path.stat().st_size / 1_048_576
+            st.success(f"Rendered {out_path.name} ({size_mb:.1f} MB)")
+
+# ─── 10. Output ───────────────────────────────────────────────────────────────
+if st.session_state.rendered_path is not None and st.session_state.rendered_path.exists():
+    st.header("10. Output")
+    out_path = st.session_state.rendered_path
+
+    size_mb = out_path.stat().st_size / 1_048_576
+    out_cols = st.columns(3)
+    out_cols[0].metric("File", out_path.name)
+    out_cols[1].metric("Size", f"{size_mb:.1f} MB")
+    if st.session_state.cut_plan is not None:
+        out_cols[2].metric(
+            "Duration",
+            f"{st.session_state.cut_plan.output_duration:.1f}s",
+        )
+
+    st.caption(f"Saved to `{out_path}`")
+    # Preview the rendered video. Streamlit streams from disk — fine for moderate sizes.
+    st.video(str(out_path))
+
+    with open(out_path, "rb") as f:
+        st.download_button(
+            "⬇ Download MP4",
+            data=f,
+            file_name=out_path.name,
+            mime="video/mp4",
+        )
