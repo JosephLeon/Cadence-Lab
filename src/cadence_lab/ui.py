@@ -269,18 +269,22 @@ st.title("🎬 AI Video Editor")
 st.caption("Stage 1 — ingest + speech analysis")
 
 def _resume_from_analysis(
-    analysis_path: Path,
+    analysis_json: Path,
     source_override: Path | None = None,
 ) -> tuple[bool, list[str]]:
-    """Cascade-load any pipeline artifacts that exist alongside an analysis.json.
+    """Cascade-load any pipeline artifacts that exist for this project.
 
-    Sets up session state as if the user had walked through the earlier sections
-    in order. Each downstream artifact is optional — we load whatever is present
-    and stop there. Returns (ok, messages).
+    Looks first in the configured output dir (``paths.output_dir()``) for
+    companion files (classified / plan / rendered), then falls back to the
+    analysis JSON's own directory. That second hop covers the case where the
+    user uploaded a JSON file from somewhere outside the output dir.
+
+    Returns ``(ok, messages)``. Each downstream artifact is optional; we load
+    whatever we find and stop there.
     """
     msgs: list[str] = []
     try:
-        bundle = AnalysisBundle.model_validate_json(analysis_path.read_text())
+        bundle = AnalysisBundle.model_validate_json(analysis_json.read_text())
     except Exception as e:
         return False, [f"Could not parse analysis JSON: {e}"]
 
@@ -288,7 +292,7 @@ def _resume_from_analysis(
     if not source_path.exists():
         return False, [
             f"Source video not found at `{source_path}`. "
-            "Move it back, or pass a `Source override path` below."
+            "Move it back, or upload a Source video override below."
         ]
 
     # Probing again is cheap (ffprobe on already-known file) and gives the
@@ -302,21 +306,34 @@ def _resume_from_analysis(
     st.session_state.source_path = source_path.resolve()
     st.session_state.probe = probe_result
     st.session_state.analysis_bundle = bundle
-    st.session_state.analysis_json_path = analysis_path
+    st.session_state.analysis_json_path = analysis_json
     msgs.append(f"✓ Loaded analysis ({len(bundle.speech.segments)} segments).")
 
-    # Try classified.json alongside
-    cls_path = analysis_path.with_suffix(".classified.json")
-    # Handle .analysis.json → .classified.json (double-suffix files)
-    if not cls_path.exists() and analysis_path.name.endswith(".analysis.json"):
-        cls_path = analysis_path.with_name(
-            analysis_path.name[: -len(".analysis.json")] + ".classified.json"
-        )
-    if cls_path.exists():
+    # Helper: prefer the configured output dir, fall back to alongside the JSON.
+    def _find_companion(stem_suffix: str) -> Path | None:
+        primary = output_dir() / f"{source_path.stem}{stem_suffix}"
+        if primary.exists():
+            return primary
+        # Backstop 1: same dir as the analysis JSON, plain suffix swap
+        sibling = analysis_json.with_suffix(stem_suffix)
+        if sibling.exists():
+            return sibling
+        # Backstop 2: double-suffix case (e.g. foo.analysis.json → foo.plan.json)
+        if analysis_json.name.endswith(".analysis.json"):
+            sibling_dbl = analysis_json.with_name(
+                analysis_json.name[: -len(".analysis.json")] + stem_suffix
+            )
+            if sibling_dbl.exists():
+                return sibling_dbl
+        return None
+
+    # Classified
+    found = _find_companion(".classified.json")
+    if found is not None:
         try:
-            cls = ClassificationBundle.model_validate_json(cls_path.read_text())
+            cls = ClassificationBundle.model_validate_json(found.read_text())
             st.session_state.classification_bundle = cls
-            st.session_state.classification_json_path = cls_path
+            st.session_state.classification_json_path = found
             msgs.append(
                 f"✓ Loaded classification "
                 f"({len(cls.classification.pauses)} pauses, "
@@ -324,28 +341,26 @@ def _resume_from_analysis(
                 f"{len(cls.classification.retakes)} retakes)."
             )
         except Exception as e:
-            msgs.append(f"⚠︎ Could not load `{cls_path.name}`: {e}")
+            msgs.append(f"⚠︎ Could not load `{found.name}`: {e}")
 
-    # Try plan.json alongside
-    plan_path = analysis_path.with_suffix(".plan.json")
-    if not plan_path.exists() and analysis_path.name.endswith(".analysis.json"):
-        plan_path = analysis_path.with_name(
-            analysis_path.name[: -len(".analysis.json")] + ".plan.json"
-        )
-    if plan_path.exists():
+    # Plan
+    found = _find_companion(".plan.json")
+    if found is not None:
         try:
-            plan = CutPlan.model_validate_json(plan_path.read_text())
+            plan = CutPlan.model_validate_json(found.read_text())
             st.session_state.cut_plan = plan
-            st.session_state.plan_json_path = plan_path
+            st.session_state.plan_json_path = found
             msgs.append(
                 f"✓ Loaded plan ({len(plan.keeps)} keep-segments, "
                 f"{plan.output_duration:.1f}s output)."
             )
         except Exception as e:
-            msgs.append(f"⚠︎ Could not load `{plan_path.name}`: {e}")
+            msgs.append(f"⚠︎ Could not load `{found.name}`: {e}")
 
-    # Already-rendered MP4 alongside the source
-    rendered = source_path.with_suffix(".edited.mp4")
+    # Already-rendered MP4 (look in output dir first, then alongside source)
+    rendered = rendered_path(source_path)
+    if not rendered.exists():
+        rendered = source_path.with_suffix(".edited.mp4")
     if rendered.exists():
         st.session_state.rendered_path = rendered
         msgs.append(f"✓ Found existing render `{rendered.name}`.")
@@ -416,48 +431,50 @@ with src_tab_resume:
         if not uploaded_jsons:
             st.error("Upload at least one JSON file (the analysis JSON).")
         else:
-            # Persist uploads to a stable temp dir so the cascade loader can
-            # find sibling files alongside the analysis JSON by name.
-            upload_dir = Path(tempfile.gettempdir()) / "cadence_lab_uploads"
-            upload_dir.mkdir(parents=True, exist_ok=True)
+            # JSONs land in the configured output dir so the cascade loader
+            # finds siblings naturally (same place future pipeline runs write to).
+            json_dest_dir = output_dir()
 
             saved_paths: list[Path] = []
             for up in uploaded_jsons:
-                dest = upload_dir / up.name
+                dest = json_dest_dir / up.name
                 dest.write_bytes(up.getbuffer())
                 saved_paths.append(dest)
 
             # Identify the analysis JSON: prefer .analysis.json suffix; fall
             # back to whichever uploaded file parses as an AnalysisBundle.
-            analysis_path: Path | None = None
+            analysis_json_path: Path | None = None
             for p in saved_paths:
                 if p.name.endswith(".analysis.json"):
-                    analysis_path = p
+                    analysis_json_path = p
                     break
-            if analysis_path is None:
+            if analysis_json_path is None:
                 for p in saved_paths:
                     try:
                         AnalysisBundle.model_validate_json(p.read_text())
-                        analysis_path = p
+                        analysis_json_path = p
                         break
                     except Exception:
                         continue
 
-            if analysis_path is None:
+            if analysis_json_path is None:
                 st.error(
                     "Couldn't find an analysis JSON in the upload. "
                     "Expected one file ending in `.analysis.json` or matching "
                     "the analysis bundle shape."
                 )
             else:
-                # Optional source override: save the uploaded video to disk.
+                # Source video override: keep this in /tmp since videos can be
+                # multi-GB and don't need to clutter the output dir.
                 src_override = None
                 if uploaded_source is not None:
-                    src_dest = upload_dir / uploaded_source.name
+                    upload_tmp = Path(tempfile.gettempdir()) / "cadence_lab_uploads"
+                    upload_tmp.mkdir(parents=True, exist_ok=True)
+                    src_dest = upload_tmp / uploaded_source.name
                     src_dest.write_bytes(uploaded_source.getbuffer())
                     src_override = src_dest
 
-                ok, msgs = _resume_from_analysis(analysis_path, src_override)
+                ok, msgs = _resume_from_analysis(analysis_json_path, src_override)
                 for m in msgs:
                     if m.startswith("✓"):
                         st.success(m)
@@ -547,9 +564,6 @@ if st.session_state.probe is not None:
         st.session_state.analysis_bundle = None
         st.session_state.analysis_json_path = None
 
-        work_dir = Path("output/work")
-        work_dir.mkdir(parents=True, exist_ok=True)
-
         # Progress UI: one status line + one progress bar that we drive across
         # the full pipeline (ingest → VAD → transcription). Ingest and VAD are
         # short bursts; Whisper transcription is where real per-segment progress
@@ -566,7 +580,6 @@ if st.session_state.probe is not None:
             on_progress(0.0, "Extracting mic-only audio...")
             ing = ingest(
                 source=st.session_state.source_path,
-                work_dir=work_dir,
                 mic_track_index=mic_track,
             )
 
@@ -580,7 +593,7 @@ if st.session_state.probe is not None:
             )
 
             bundle = AnalysisBundle(ingest=ing, speech=speech)
-            out_path = st.session_state.source_path.with_suffix(".analysis.json")
+            out_path = analysis_path(st.session_state.source_path)
             out_path.write_text(json.dumps(bundle.model_dump(mode="json"), indent=2))
 
             st.session_state.analysis_bundle = bundle
@@ -668,9 +681,9 @@ if st.session_state.analysis_bundle is not None:
             st.exception(e)
         else:
             st.session_state.classification_bundle = result
-            # Persist alongside the analysis JSON if we have a source path
+            # Persist to the configured output dir
             if st.session_state.source_path is not None:
-                cls_path = st.session_state.source_path.with_suffix(".classified.json")
+                cls_path = classified_path(st.session_state.source_path)
                 cls_path.write_text(
                     json.dumps(result.model_dump(mode="json"), indent=2)
                 )
@@ -829,11 +842,9 @@ if st.session_state.classification_bundle is not None:
         else:
             st.session_state.cut_plan = plan
             if st.session_state.source_path is not None:
-                plan_path = st.session_state.source_path.with_suffix(".plan.json")
-                plan_path.write_text(
-                    json.dumps(plan.model_dump(mode="json"), indent=2)
-                )
-                st.session_state.plan_json_path = plan_path
+                pj = plan_path(st.session_state.source_path)
+                pj.write_text(json.dumps(plan.model_dump(mode="json"), indent=2))
+                st.session_state.plan_json_path = pj
             st.success("Cut plan built.")
 
 # ─── 8. Plan results ──────────────────────────────────────────────────────────
@@ -1199,13 +1210,11 @@ if (
             params=st.session_state.cut_plan.params,
         )
         st.session_state.cut_plan = new_plan
-        # Re-save the plan JSON alongside the source.
+        # Re-save the plan JSON to the configured output dir.
         if st.session_state.source_path is not None:
-            plan_path = st.session_state.source_path.with_suffix(".plan.json")
-            plan_path.write_text(
-                json.dumps(new_plan.model_dump(mode="json"), indent=2)
-            )
-            st.session_state.plan_json_path = plan_path
+            pj = plan_path(st.session_state.source_path)
+            pj.write_text(json.dumps(new_plan.model_dump(mode="json"), indent=2))
+            st.session_state.plan_json_path = pj
         # An earlier render is now stale.
         st.session_state.rendered_path = None
         st.success(
@@ -1256,7 +1265,7 @@ if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is
 
     if st.button("▶ Render MP4", type="primary"):
         source_path = st.session_state.source_path
-        out_path = source_path.with_suffix(".edited.mp4")
+        out_path = rendered_path(source_path)
 
         progress_bar = st.progress(0.0)
         status_line = st.empty()

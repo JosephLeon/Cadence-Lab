@@ -92,12 +92,21 @@ Each stage writes a structured JSON file. The next stage reads it. You can
 stop at any stage, edit the JSON by hand if you want, and resume.
 
 ```
-recording.mov                  ← source
-recording.analysis.json        ← stage 2 output: probe + transcript + VAD
-recording.classified.json      ← stage 3 output: per-pause/filler classifications
-recording.plan.json            ← stage 4 output: keep-segments + audit log
-recording.edited.mp4           ← stage 5 output: the final video
+files/                              ← default output directory (configurable)
+├── recording.analysis.json         ← stage 2 output: probe + transcript + VAD
+├── recording.classified.json       ← stage 3 output: per-pause/filler classifications
+├── recording.plan.json             ← stage 4 output: keep-segments + audit log
+├── recording.edited.mp4            ← stage 5 output: the final video
+└── recording.mic.16k.wav           ← intermediate: mic-only audio for VAD + Whisper
 ```
+
+The output directory is configurable via the `CADENCE_OUTPUT_DIR` environment
+variable in `.env`. Defaults to `./files/` (project-relative) so the tool
+works out of the box. Useful overrides:
+
+- Keep sources on an external drive but outputs on local disk
+- Centralize outputs across many projects in one folder
+- Per-project output dirs for clean separation
 
 ---
 
@@ -280,6 +289,7 @@ src/cadence_lab/
 ├── planner.py    # interval algebra → CutPlan (no API, no video)
 ├── renderer.py   # FFmpeg filter_complex (videotoolbox or libx264)
 ├── reviewer.py   # apply_overrides() + per-cut audio clip extraction
+├── paths.py      # output_dir() + per-stage path helpers (one source of truth)
 ├── models.py     # pydantic data models (the JSON contract)
 └── __init__.py
 ```

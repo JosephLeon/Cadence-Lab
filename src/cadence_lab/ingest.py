@@ -15,6 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .models import AudioTrack, IngestResult, SourceProbe
+from .paths import mic_wav_path
 
 
 class IngestError(RuntimeError):
@@ -140,10 +141,14 @@ def extract_mic_audio(
 
 def ingest(
     source: Path,
-    work_dir: Path,
     mic_track_index: int = 0,
 ) -> IngestResult:
-    """Probe the source and extract the mic-only normalized WAV."""
+    """Probe the source and extract the mic-only normalized WAV.
+
+    The mic WAV is written to the configured output directory (see
+    ``paths.output_dir``) — same place as every other pipeline artifact, so
+    a project's files live together without an ``output/work/`` side dir.
+    """
     src = probe(source)
     if mic_track_index >= len(src.audio_tracks):
         raise IngestError(
@@ -154,7 +159,7 @@ def ingest(
     normalized = extract_mic_audio(
         source=source,
         mic_track_index=mic_track_index,
-        output_path=work_dir / f"{source.stem}.mic.16k.wav",
+        output_path=mic_wav_path(source),
     )
 
     return IngestResult(

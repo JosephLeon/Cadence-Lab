@@ -30,6 +30,12 @@ from .models import (
     CutPlanParams,
     SpeechAnalysis,
 )
+from .paths import (
+    analysis_path,
+    classified_path,
+    plan_path,
+    rendered_path,
+)
 from .planner import plan_cuts
 from .renderer import render
 from .speech import Backend, ComputeType, WhisperModelSize, analyze
@@ -100,19 +106,17 @@ def analyze_cmd(
         str | None,
         typer.Option(help="Force a language code (e.g. 'en') instead of auto-detect."),
     ] = None,
-    work_dir: Annotated[
-        Path, typer.Option(help="Directory for intermediate WAVs.")
-    ] = Path("output/work"),
     out: Annotated[
         Path | None,
-        typer.Option(help="Where to write the analysis JSON (default: alongside source)."),
+        typer.Option(
+            help="Where to write the analysis JSON. Defaults to the configured "
+                 "output directory (CADENCE_OUTPUT_DIR or ./files).",
+        ),
     ] = None,
 ) -> None:
     """Run ingest + speech analysis and write a JSON bundle to disk."""
-    work_dir.mkdir(parents=True, exist_ok=True)
-
     with console.status("[bold cyan]Probing source and extracting mic audio..."):
-        ing = ingest(source=source, work_dir=work_dir, mic_track_index=mic_track)
+        ing = ingest(source=source, mic_track_index=mic_track)
     console.print(
         f"[green]✓[/green] extracted mic track {mic_track} → "
         f"[dim]{ing.normalized_audio_path}[/dim]"
@@ -138,7 +142,7 @@ def analyze_cmd(
     )
 
     bundle = AnalysisBundle(ingest=ing, speech=speech)
-    out_path = out or source.with_suffix(".analysis.json")
+    out_path = out or analysis_path(source)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(bundle.model_dump(mode="json"), indent=2))
     console.print(f"[green]✓[/green] wrote analysis bundle → [bold]{out_path}[/bold]")
@@ -175,7 +179,7 @@ def classify_cmd(
             min_pause_seconds=min_pause_ms / 1000.0,
         )
 
-    out_path = out or analysis_json.with_suffix(".classified.json")
+    out_path = out or classified_path(bundle.ingest.source.path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result.model_dump(mode="json"), indent=2))
 
@@ -228,7 +232,13 @@ def plan_cmd(
 ) -> None:
     """Build the edit decision list (keep-segments) from analysis + classification."""
     bundle = AnalysisBundle.model_validate_json(analysis_json.read_text())
-    cls_path = classified or analysis_json.with_suffix(".classified.json")
+    cls_path = classified or classified_path(bundle.ingest.source.path)
+    # Backstop: if the configured-dir lookup misses, also look alongside the
+    # analysis JSON itself — covers users who passed a path from elsewhere.
+    if not cls_path.exists():
+        sibling = analysis_json.with_suffix(".classified.json")
+        if sibling.exists():
+            cls_path = sibling
     if not cls_path.exists():
         console.print(
             f"[red]✗[/red] Classification JSON not found at [bold]{cls_path}[/bold]. "
@@ -247,7 +257,7 @@ def plan_cmd(
     with console.status("[bold cyan]Computing cut plan..."):
         plan: CutPlan = plan_cuts(bundle.speech, cls_bundle, params=params)
 
-    out_path = out or analysis_json.with_suffix(".plan.json")
+    out_path = out or plan_path(bundle.ingest.source.path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(plan.model_dump(mode="json"), indent=2))
 
@@ -324,14 +334,20 @@ def render_cmd(
 ) -> None:
     """Render the cut plan into a YouTube-ready MP4."""
     bundle = AnalysisBundle.model_validate_json(analysis_json.read_text())
-    plan_path = plan_json or analysis_json.with_suffix(".plan.json")
-    if not plan_path.exists():
+    # Look in the configured output dir first, fall back to the JSON's own
+    # location for users passing a path from elsewhere.
+    pj = plan_json or plan_path(bundle.ingest.source.path)
+    if not pj.exists():
+        sibling = analysis_json.with_suffix(".plan.json")
+        if sibling.exists():
+            pj = sibling
+    if not pj.exists():
         console.print(
-            f"[red]✗[/red] Plan JSON not found at [bold]{plan_path}[/bold]. "
+            f"[red]✗[/red] Plan JSON not found at [bold]{pj}[/bold]. "
             "Run `plan` first, or pass --plan."
         )
         raise typer.Exit(code=1)
-    plan = CutPlan.model_validate_json(plan_path.read_text())
+    plan = CutPlan.model_validate_json(pj.read_text())
 
     source_path = (source or bundle.ingest.source.path).expanduser()
     if not source_path.exists():
@@ -339,7 +355,7 @@ def render_cmd(
         raise typer.Exit(code=1)
 
     track = audio_track if audio_track is not None else bundle.ingest.mic_track_index
-    out_path = out or source_path.with_suffix(".edited.mp4")
+    out_path = out or rendered_path(source_path)
 
     console.print(
         f"[bold]Rendering[/bold] {plan.source_duration:.1f}s → {plan.output_duration:.1f}s "
