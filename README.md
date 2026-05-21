@@ -9,8 +9,8 @@ render) plug into the JSON bundle this stage writes.
 ## Status
 
 - ✅ Stage 1 — ingest (probe + mic-track extraction + 16 kHz mono normalization)
-- ✅ Stage 2 — speech analysis (Silero VAD + faster-whisper word timestamps)
-- ⏳ Stage 3 — pause classification (LLM semantic pass)
+- ✅ Stage 2 — speech analysis (Silero VAD + Whisper word timestamps, Groq backend)
+- ✅ Stage 3 — pause / filler / retake classification (Claude Opus 4.7)
 - ⏳ Stage 4 — cut planner (snap to screen-change zones, breath handling, crossfades)
 - ⏳ Stage 5 — renderer (FFmpeg, stream-copy where possible)
 - ⏳ Stage 6 — review UI
@@ -29,6 +29,16 @@ cp .env.example .env
 ```
 
 That creates `.venv/` and installs everything in `pyproject.toml`.
+
+### API keys
+
+The default pipeline uses two hosted APIs:
+
+- **Groq** for transcription (whisper-large-v3 at ~30× realtime)
+- **Anthropic** for pause classification (Claude Opus 4.7)
+
+Copy `.env.example` to `.env` and fill in both keys. Expected per-video cost
+at default settings is well under a dollar (Groq ~$0.05, Claude ~$0.50–$1).
 
 ### Transcription backends
 
@@ -83,6 +93,21 @@ labeled them) titles. Pick the index of the mic track for the next step.
 uv run video-editor analyze path/to/recording.mov --mic-track 0
 ```
 
+#### 3. Classify pauses / fillers / retakes (stage 3)
+
+```sh
+uv run video-editor classify path/to/recording.analysis.json
+```
+
+Sends the transcript + per-word timestamps to Claude Opus 4.7 with a frozen
+classification rubric. Output: `recording.classified.json` containing per-pause
+category + action + reason, per-filler-candidate cut/keep, and detected retakes
+(speaker repeated themselves). Requires `ANTHROPIC_API_KEY` in `.env`.
+
+Useful flags:
+- `--min-pause-ms 250` (default) — gaps below this aren't classified
+- `--out path/file.json` — override output location
+
 Writes a structured JSON bundle (`recording.analysis.json`) containing:
 
 - the source probe (codecs, resolution, fps, VFR flag, all audio tracks)
@@ -110,11 +135,12 @@ Useful flags:
 
 ```
 src/video_editor/
-├── cli.py        # typer CLI: `probe`, `analyze`, `ui`
+├── cli.py        # typer CLI: `probe`, `analyze`, `classify`, `ui`
 ├── ui.py         # streamlit app
 ├── ingest.py     # ffprobe + ffmpeg extraction
 ├── speech.py     # Silero VAD + transcription dispatch
 ├── backends.py   # groq + local (faster-whisper) transcription backends
+├── classifier.py # pause / filler / retake classifier (Claude Opus 4.7)
 ├── models.py     # pydantic data models (JSON contract)
 └── __init__.py
 ```

@@ -92,3 +92,87 @@ class AnalysisBundle(BaseModel):
     ingest: IngestResult
     speech: SpeechAnalysis
     schema_version: Literal[1] = 1
+
+
+# ─── Stage 3: pause/filler classification ─────────────────────────────────────
+
+PauseCategory = Literal[
+    "filler",       # empty thinking pause, cut entirely
+    "hesitation",   # mid-sentence stumble, cut entirely
+    "breath",       # natural inhale/exhale, trim to ~150ms (do NOT cut)
+    "emphasis",     # intentional dramatic beat, keep
+    "pre_laughter", # speaker about to laugh, keep
+    "transition",   # topic change, keep or trim moderately
+    "listening",    # waiting for off-camera cue, keep
+]
+PauseAction = Literal["cut", "trim", "keep"]
+FillerAction = Literal["cut", "keep"]
+
+
+class PauseCandidate(BaseModel):
+    """A gap between consecutive words that exceeds the classification threshold."""
+
+    id: int
+    start: float  # end of preceding word
+    end: float    # start of following word
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+class FillerCandidate(BaseModel):
+    """A word matched by the filler-token list, queued for context-aware judgment."""
+
+    id: int
+    word_index: int  # index into SpeechAnalysis.words (the flattened list)
+    text: str
+    start: float
+    end: float
+
+
+class ClassifiedPause(BaseModel):
+    id: int
+    category: PauseCategory
+    action: PauseAction
+    trim_to_ms: int | None = None
+    reason: str
+
+
+class ClassifiedFiller(BaseModel):
+    id: int
+    action: FillerAction
+    reason: str
+
+
+class Retake(BaseModel):
+    """A semantic duplicate detected by the classifier — speaker repeated themselves."""
+
+    cut_start: float
+    cut_end: float
+    keep_start: float
+    keep_end: float
+    reason: str
+
+
+class Classification(BaseModel):
+    pauses: list[ClassifiedPause]
+    fillers: list[ClassifiedFiller]
+    retakes: list[Retake]
+
+
+class ClassificationBundle(BaseModel):
+    """Stage-3 output: pause/filler candidates + Claude's classification.
+
+    Persisted alongside the analysis JSON, consumed by the cut planner (stage 4).
+    """
+
+    pause_candidates: list[PauseCandidate]
+    filler_candidates: list[FillerCandidate]
+    classification: Classification
+    model_used: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    schema_version: Literal[1] = 1

@@ -21,8 +21,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .classifier import classify
 from .ingest import ingest, probe
-from .models import AnalysisBundle
+from .models import AnalysisBundle, ClassificationBundle, SpeechAnalysis
 from .speech import Backend, ComputeType, WhisperModelSize, analyze
 
 app = typer.Typer(
@@ -133,6 +134,59 @@ def analyze_cmd(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(bundle.model_dump(mode="json"), indent=2))
     console.print(f"[green]✓[/green] wrote analysis bundle → [bold]{out_path}[/bold]")
+
+
+@app.command("classify")
+def classify_cmd(
+    analysis_json: Annotated[
+        Path,
+        typer.Argument(
+            exists=True, dir_okay=False, readable=True,
+            help="Path to an analysis JSON produced by `analyze`.",
+        ),
+    ],
+    min_pause_ms: Annotated[
+        int,
+        typer.Option(
+            "--min-pause-ms",
+            help="Minimum gap (ms) between words to classify as a pause.",
+        ),
+    ] = 250,
+    out: Annotated[
+        Path | None,
+        typer.Option(help="Where to write the classification JSON (default: alongside input)."),
+    ] = None,
+) -> None:
+    """Classify pauses, fillers, and retakes via Claude Opus 4.7."""
+    bundle = AnalysisBundle.model_validate_json(analysis_json.read_text())
+    speech: SpeechAnalysis = bundle.speech
+
+    with console.status("[bold cyan]Classifying with Claude Opus 4.7..."):
+        result: ClassificationBundle = classify(
+            speech,
+            min_pause_seconds=min_pause_ms / 1000.0,
+        )
+
+    out_path = out or analysis_json.with_suffix(".classified.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result.model_dump(mode="json"), indent=2))
+
+    cls = result.classification
+    cut_p = sum(1 for p in cls.pauses if p.action == "cut")
+    trim_p = sum(1 for p in cls.pauses if p.action == "trim")
+    keep_p = sum(1 for p in cls.pauses if p.action == "keep")
+    cut_f = sum(1 for f in cls.fillers if f.action == "cut")
+    console.print(
+        f"[green]✓[/green] {len(cls.pauses)} pauses classified "
+        f"({cut_p} cut / {trim_p} trim / {keep_p} keep), "
+        f"{cut_f}/{len(cls.fillers)} fillers cut, "
+        f"{len(cls.retakes)} retakes."
+    )
+    console.print(
+        f"[dim]tokens: {result.input_tokens} in, {result.output_tokens} out "
+        f"(cache_read={result.cache_read_input_tokens})[/dim]"
+    )
+    console.print(f"[green]✓[/green] wrote classification → [bold]{out_path}[/bold]")
 
 
 @app.command("ui")

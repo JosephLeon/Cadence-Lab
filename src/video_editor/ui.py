@@ -23,8 +23,9 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
+from video_editor.classifier import classify as run_classify
 from video_editor.ingest import IngestError, ingest, probe
-from video_editor.models import AnalysisBundle, SourceProbe
+from video_editor.models import AnalysisBundle, ClassificationBundle, SourceProbe
 from video_editor.speech import analyze
 
 load_dotenv()
@@ -38,6 +39,8 @@ _DEFAULTS: dict[str, object] = {
     "probe": None,              # SourceProbe | None
     "analysis_bundle": None,    # AnalysisBundle | None
     "analysis_json_path": None, # Path | None
+    "classification_bundle": None,  # ClassificationBundle | None
+    "classification_json_path": None,  # Path | None
 }
 for k, v in _DEFAULTS.items():
     st.session_state.setdefault(k, v)
@@ -58,6 +61,8 @@ def _reset_downstream() -> None:
     st.session_state.probe = None
     st.session_state.analysis_bundle = None
     st.session_state.analysis_json_path = None
+    st.session_state.classification_bundle = None
+    st.session_state.classification_json_path = None
 
 
 def _render_probe(p: SourceProbe) -> None:
@@ -319,5 +324,165 @@ if st.session_state.analysis_bundle is not None:
         "⬇ Download analysis JSON",
         data=json_blob,
         file_name=(st.session_state.analysis_json_path or Path("analysis.json")).name,
+        mime="application/json",
+    )
+
+# ─── 5. Classify (Stage 3) ────────────────────────────────────────────────────
+if st.session_state.analysis_bundle is not None:
+    st.header("5. Classify pauses & fillers (Claude)")
+    st.caption(
+        "Sends the transcript + word-level pauses to Claude Opus 4.7 with a "
+        "frozen rubric. Each pause is classified (filler / hesitation / breath / "
+        "emphasis / pre-laughter / transition / listening), each candidate "
+        "filler word gets cut/keep, and retakes are detected."
+    )
+
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        st.warning(
+            "ANTHROPIC_API_KEY not set. Add it to `.env` (see `.env.example`) "
+            "and relaunch."
+        )
+    else:
+        st.caption(":green[✓ ANTHROPIC_API_KEY detected]")
+
+    min_pause_ms = st.slider(
+        "Minimum pause (ms) to classify",
+        min_value=100, max_value=1000, value=250, step=50,
+        help="Gaps between words shorter than this are treated as natural spacing "
+             "and skipped.",
+    )
+
+    run_cls = st.button(
+        "▶ Run classification",
+        type="primary",
+        disabled=not os.getenv("ANTHROPIC_API_KEY"),
+    )
+
+    if run_cls:
+        st.session_state.classification_bundle = None
+        st.session_state.classification_json_path = None
+
+        progress_bar = st.progress(0.0)
+        status_line = st.empty()
+
+        def on_cls_progress(frac: float, msg: str) -> None:
+            progress_bar.progress(min(max(frac, 0.0), 1.0))
+            status_line.markdown(f"**{msg}**")
+
+        try:
+            result = run_classify(
+                speech=st.session_state.analysis_bundle.speech,
+                min_pause_seconds=min_pause_ms / 1000.0,
+                progress=on_cls_progress,
+            )
+        except Exception as e:
+            progress_bar.empty()
+            status_line.empty()
+            st.exception(e)
+        else:
+            st.session_state.classification_bundle = result
+            # Persist alongside the analysis JSON if we have a source path
+            if st.session_state.source_path is not None:
+                cls_path = st.session_state.source_path.with_suffix(".classified.json")
+                cls_path.write_text(
+                    json.dumps(result.model_dump(mode="json"), indent=2)
+                )
+                st.session_state.classification_json_path = cls_path
+            progress_bar.progress(1.0)
+            status_line.empty()
+            st.success("Classification complete.")
+
+# ─── 6. Classification results ────────────────────────────────────────────────
+if st.session_state.classification_bundle is not None:
+    st.header("6. Classification results")
+    cls_bundle: ClassificationBundle = st.session_state.classification_bundle
+    cls = cls_bundle.classification
+
+    cut_p = sum(1 for p in cls.pauses if p.action == "cut")
+    trim_p = sum(1 for p in cls.pauses if p.action == "trim")
+    keep_p = sum(1 for p in cls.pauses if p.action == "keep")
+    cut_f = sum(1 for f in cls.fillers if f.action == "cut")
+
+    cols = st.columns(4)
+    cols[0].metric("Pauses cut", str(cut_p))
+    cols[1].metric("Pauses trimmed", str(trim_p))
+    cols[2].metric("Pauses kept", str(keep_p))
+    cols[3].metric("Fillers cut", f"{cut_f} / {len(cls.fillers)}")
+
+    cost_cols = st.columns(4)
+    cost_cols[0].metric("Retakes", str(len(cls.retakes)))
+    cost_cols[1].metric("Input tokens", f"{cls_bundle.input_tokens:,}")
+    cost_cols[2].metric("Output tokens", f"{cls_bundle.output_tokens:,}")
+    cost_cols[3].metric("Cache read", f"{cls_bundle.cache_read_input_tokens:,}")
+
+    tabs = st.tabs(["Pauses", "Fillers", "Retakes", "Raw JSON"])
+
+    # Build lookup: pause_id -> candidate (for start/end timestamps)
+    pause_by_id = {p.id: p for p in cls_bundle.pause_candidates}
+    filler_by_id = {f.id: f for f in cls_bundle.filler_candidates}
+
+    with tabs[0]:
+        st.dataframe(
+            [
+                {
+                    "id": p.id,
+                    "start": round(pause_by_id[p.id].start, 2) if p.id in pause_by_id else None,
+                    "dur (s)": round(pause_by_id[p.id].duration, 2) if p.id in pause_by_id else None,
+                    "category": p.category,
+                    "action": p.action,
+                    "trim → ms": p.trim_to_ms,
+                    "reason": p.reason,
+                }
+                for p in cls.pauses
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabs[1]:
+        st.dataframe(
+            [
+                {
+                    "id": f.id,
+                    "start": round(filler_by_id[f.id].start, 2) if f.id in filler_by_id else None,
+                    "word": filler_by_id[f.id].text if f.id in filler_by_id else "?",
+                    "action": f.action,
+                    "reason": f.reason,
+                }
+                for f in cls.fillers
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tabs[2]:
+        if not cls.retakes:
+            st.caption("No retakes detected.")
+        else:
+            st.dataframe(
+                [
+                    {
+                        "cut_start": round(r.cut_start, 2),
+                        "cut_end": round(r.cut_end, 2),
+                        "keep_start": round(r.keep_start, 2),
+                        "keep_end": round(r.keep_end, 2),
+                        "reason": r.reason,
+                    }
+                    for r in cls.retakes
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with tabs[3]:
+        st.json(cls_bundle.model_dump(mode="json"), expanded=False)
+
+    st.download_button(
+        "⬇ Download classification JSON",
+        data=json.dumps(cls_bundle.model_dump(mode="json"), indent=2),
+        file_name=(
+            st.session_state.classification_json_path
+            or Path("classification.json")
+        ).name,
         mime="application/json",
     )
