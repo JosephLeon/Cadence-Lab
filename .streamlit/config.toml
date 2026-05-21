@@ -3,3 +3,13 @@ gatherUsageStats = false
 
 [server]
 maxUploadSize = 4096
+
+# Dark theme — Tailwind slate-900 base + blue-500 accent.
+# Goal: feels like a real dev tool app (Linear / Vercel / Raycast vibe).
+[theme]
+base                       = "dark"
+primaryColor               = "#3B82F6"  # blue-500 — pops against the dark bg
+backgroundColor            = "#0B1220"  # slightly darker than slate-900 — true app feel
+secondaryBackgroundColor   = "#111827"  # gray-900 — cards / expanders / sidebar
+textColor                  = "#E2E8F0"  # slate-200 — easy-on-the-eyes light text
+font                       = "sans serif"

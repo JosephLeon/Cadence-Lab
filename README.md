@@ -61,7 +61,15 @@ Two backends are available; pick at runtime via `--backend` or the UI dropdown.
 uv run video-editor ui
 ```
 
-Opens a Streamlit app at <http://localhost:8501> with three steps:
+Opens a Streamlit app at <http://localhost:8501>.
+
+**Resuming an existing project:** if you already have the JSON artifacts from a
+previous run (`*.analysis.json`, `*.classified.json`, `*.plan.json`), use the
+**"Resume from JSON"** tab in Section 1. Point at the analysis JSON and it
+auto-discovers everything alongside it — you land on whichever section
+corresponds to where you left off (skip straight to Review or Render).
+
+**New project, full flow:**
 
 1. **Source** — drop a file in the uploader, or paste a path on disk (use the
    path tab for large OBS recordings; the uploader allows up to 4 GB but path
@@ -74,6 +82,15 @@ Opens a Streamlit app at <http://localhost:8501> with three steps:
    button for the JSON bundle.
 
 ### Option B — CLI
+
+Each stage can run independently if its input JSON already exists. For
+example, if you already have an `analysis.json` and just want to render:
+
+```sh
+uv run video-editor render path/to/recording.analysis.json   # uses plan.json alongside
+```
+
+The full one-stage-at-a-time flow:
 
 #### 1. Probe a source video
 
@@ -158,9 +175,10 @@ and produces `recording.edited.mp4` — libx264 + AAC with per-segment audio
 fade-in/out at every cut for click-free joins.
 
 Useful flags:
-- `--crf 18` (default) — libx264 quality. Lower = better (14–17 archival,
-  18–20 near-lossless, 23 YouTube-default-ish)
-- `--preset slow` (default) — quality/speed tradeoff: `ultrafast` → `veryslow`
+- `--encoder auto` (default) — hardware-accelerated h264_videotoolbox on
+  Apple Silicon (10–30× faster than libx264). Falls back to libx264 if
+  unavailable. Use `--encoder libx264` for an archival-quality CPU master
+  (`-preset slow -crf 18`, much slower).
 - `--audio-bitrate 192k`
 - `--audio-track N` — override which audio track to render (defaults to the
   mic track picked at ingest time)

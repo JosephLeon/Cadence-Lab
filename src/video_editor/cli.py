@@ -306,14 +306,16 @@ def render_cmd(
             help="Audio track index (default: same as ingest's mic track).",
         ),
     ] = None,
-    crf: Annotated[
-        int,
-        typer.Option(help="libx264 CRF — lower = better. 18 ≈ visually lossless."),
-    ] = 18,
-    preset: Annotated[
+    encoder: Annotated[
         str,
-        typer.Option(help="libx264 preset: ultrafast/superfast/.../slow/veryslow."),
-    ] = "slow",
+        typer.Option(
+            help=(
+                "Video encoder: 'auto' (recommended — uses hardware encoder on "
+                "Apple Silicon), 'h264_videotoolbox' (explicit hardware), or "
+                "'libx264' (archival quality, ~10× slower)."
+            ),
+        ),
+    ] = "auto",
     audio_bitrate: Annotated[str, typer.Option(help="AAC bitrate.")] = "192k",
     out: Annotated[
         Path | None,
@@ -358,8 +360,7 @@ def render_cmd(
         plan=plan,
         output_path=out_path,
         audio_track_index=track,
-        video_crf=crf,
-        video_preset=preset,
+        encoder=encoder,  # type: ignore[arg-type]
         audio_bitrate=audio_bitrate,
         progress=cli_progress,
     )
@@ -367,8 +368,7 @@ def render_cmd(
     size_mb = out_path.stat().st_size / 1_048_576
     console.print(
         f"[green]✓[/green] [bold]{out_path}[/bold] "
-        f"({size_mb:.1f} MB, {plan.output_duration:.1f}s, "
-        f"libx264 {preset} CRF {crf})"
+        f"({size_mb:.1f} MB, {plan.output_duration:.1f}s, encoder: {encoder})"
     )
 
 

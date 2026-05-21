@@ -41,6 +41,50 @@ load_dotenv()
 
 st.set_page_config(page_title="AI Video Editor", page_icon="🎬", layout="wide")
 
+# Light polish on top of the dark [theme] in .streamlit/config.toml.
+# Heavy CSS overrides in Streamlit are fragile across versions — keeping this
+# to a few stable data-testid selectors that have been around for years.
+st.markdown(
+    """
+    <style>
+      /* Tighter main container so long pages don't feel sprawling */
+      .main .block-container { padding-top: 2rem; padding-bottom: 4rem; max-width: 1180px; }
+
+      /* App-style metric cards on dark bg */
+      div[data-testid="stMetric"] {
+        background-color: #111827;          /* gray-900 */
+        border: 1px solid #1F2937;          /* gray-800 */
+        border-radius: 0.5rem;
+        padding: 0.75rem 1rem;
+      }
+      div[data-testid="stMetricLabel"] { color: #94A3B8; font-weight: 500; }  /* slate-400 */
+      div[data-testid="stMetricValue"] { font-size: 1.5rem; color: #F1F5F9; }  /* slate-100 */
+
+      /* Headers get a touch more weight + space */
+      h1, h2 { font-weight: 650; letter-spacing: -0.01em; }
+      h2 { margin-top: 2.5rem; }
+
+      /* Buttons feel more like an app */
+      .stButton > button { border-radius: 0.5rem; font-weight: 500; }
+      .stDownloadButton > button { border-radius: 0.5rem; font-weight: 500; }
+
+      /* Expanders: dark surface with subtle border */
+      div[data-testid="stExpander"] {
+        border: 1px solid #1F2937;
+        border-radius: 0.5rem;
+      }
+      .streamlit-expanderHeader { font-weight: 500; }
+
+      /* Code blocks / inline code on dark bg */
+      code { background-color: #1F2937; color: #E2E8F0; padding: 0.1em 0.3em; border-radius: 0.25rem; }
+
+      /* Dataframes — slightly lighter row alternation than default */
+      div[data-testid="stDataFrame"] { border-radius: 0.5rem; overflow: hidden; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Persistent state across reruns — Streamlit reruns the whole script on every
 # interaction, so anything we want to survive lives in session_state.
 _DEFAULTS: dict[str, object] = {
@@ -135,25 +179,71 @@ def _render_analysis(bundle: AnalysisBundle) -> None:
     tabs = st.tabs(["Transcript", "VAD regions", "Raw JSON"])
 
     with tabs[0]:
-        for seg in speech.segments:
-            with st.expander(
-                f"[{seg.start:7.2f} → {seg.end:7.2f}]  {seg.text.strip()[:120]}"
-            ):
-                st.write(seg.text)
-                if seg.words:
-                    st.dataframe(
-                        [
-                            {
-                                "word": w.text,
-                                "start": round(w.start, 3),
-                                "end": round(w.end, 3),
-                                "prob": round(w.probability, 3) if w.probability else None,
-                            }
-                            for w in seg.words
-                        ],
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+        # Long transcripts: default to a scannable single dataframe instead of
+        # 100+ stacked expanders. Toggle for word-level detail when needed.
+        opt_cols = st.columns([3, 2])
+        with opt_cols[0]:
+            search = st.text_input(
+                "Filter by text (case-insensitive substring)",
+                value="",
+                key="transcript_search",
+                placeholder="e.g. 'unfortunately' or 'so let's'",
+                label_visibility="collapsed",
+            )
+        with opt_cols[1]:
+            detail = st.toggle(
+                "Word-level detail (slower for long transcripts)",
+                value=False,
+                key="transcript_detail",
+            )
+
+        q = search.lower().strip()
+        segments = (
+            [s for s in speech.segments if q in s.text.lower()]
+            if q else speech.segments
+        )
+
+        st.caption(
+            f"{len(segments)} of {len(speech.segments)} segments"
+            + (f" matching '{search}'" if q else "")
+        )
+
+        if not detail:
+            st.dataframe(
+                [
+                    {
+                        "start": round(seg.start, 2),
+                        "end": round(seg.end, 2),
+                        "dur (s)": round(seg.end - seg.start, 2),
+                        "words": len(seg.words),
+                        "text": seg.text.strip(),
+                    }
+                    for seg in segments
+                ],
+                use_container_width=True,
+                hide_index=True,
+                height=420,
+            )
+        else:
+            for seg in segments:
+                with st.expander(
+                    f"[{seg.start:7.2f} → {seg.end:7.2f}]  {seg.text.strip()[:120]}"
+                ):
+                    st.write(seg.text)
+                    if seg.words:
+                        st.dataframe(
+                            [
+                                {
+                                    "word": w.text,
+                                    "start": round(w.start, 3),
+                                    "end": round(w.end, 3),
+                                    "prob": round(w.probability, 3) if w.probability else None,
+                                }
+                                for w in seg.words
+                            ],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
     with tabs[1]:
         st.dataframe(
@@ -178,9 +268,96 @@ def _render_analysis(bundle: AnalysisBundle) -> None:
 st.title("🎬 AI Video Editor")
 st.caption("Stage 1 — ingest + speech analysis")
 
+def _resume_from_analysis(
+    analysis_path: Path,
+    source_override: Path | None = None,
+) -> tuple[bool, list[str]]:
+    """Cascade-load any pipeline artifacts that exist alongside an analysis.json.
+
+    Sets up session state as if the user had walked through the earlier sections
+    in order. Each downstream artifact is optional — we load whatever is present
+    and stop there. Returns (ok, messages).
+    """
+    msgs: list[str] = []
+    try:
+        bundle = AnalysisBundle.model_validate_json(analysis_path.read_text())
+    except Exception as e:
+        return False, [f"Could not parse analysis JSON: {e}"]
+
+    source_path = (source_override or bundle.ingest.source.path).expanduser()
+    if not source_path.exists():
+        return False, [
+            f"Source video not found at `{source_path}`. "
+            "Move it back, or pass a `Source override path` below."
+        ]
+
+    # Probing again is cheap (ffprobe on already-known file) and gives the
+    # Probe section something to render without forcing a full reset.
+    try:
+        probe_result = probe(source_path)
+    except IngestError as e:
+        return False, [f"Probe failed on `{source_path}`: {e}"]
+
+    _reset_downstream()
+    st.session_state.source_path = source_path.resolve()
+    st.session_state.probe = probe_result
+    st.session_state.analysis_bundle = bundle
+    st.session_state.analysis_json_path = analysis_path
+    msgs.append(f"✓ Loaded analysis ({len(bundle.speech.segments)} segments).")
+
+    # Try classified.json alongside
+    cls_path = analysis_path.with_suffix(".classified.json")
+    # Handle .analysis.json → .classified.json (double-suffix files)
+    if not cls_path.exists() and analysis_path.name.endswith(".analysis.json"):
+        cls_path = analysis_path.with_name(
+            analysis_path.name[: -len(".analysis.json")] + ".classified.json"
+        )
+    if cls_path.exists():
+        try:
+            cls = ClassificationBundle.model_validate_json(cls_path.read_text())
+            st.session_state.classification_bundle = cls
+            st.session_state.classification_json_path = cls_path
+            msgs.append(
+                f"✓ Loaded classification "
+                f"({len(cls.classification.pauses)} pauses, "
+                f"{len(cls.classification.fillers)} fillers, "
+                f"{len(cls.classification.retakes)} retakes)."
+            )
+        except Exception as e:
+            msgs.append(f"⚠︎ Could not load `{cls_path.name}`: {e}")
+
+    # Try plan.json alongside
+    plan_path = analysis_path.with_suffix(".plan.json")
+    if not plan_path.exists() and analysis_path.name.endswith(".analysis.json"):
+        plan_path = analysis_path.with_name(
+            analysis_path.name[: -len(".analysis.json")] + ".plan.json"
+        )
+    if plan_path.exists():
+        try:
+            plan = CutPlan.model_validate_json(plan_path.read_text())
+            st.session_state.cut_plan = plan
+            st.session_state.plan_json_path = plan_path
+            msgs.append(
+                f"✓ Loaded plan ({len(plan.keeps)} keep-segments, "
+                f"{plan.output_duration:.1f}s output)."
+            )
+        except Exception as e:
+            msgs.append(f"⚠︎ Could not load `{plan_path.name}`: {e}")
+
+    # Already-rendered MP4 alongside the source
+    rendered = source_path.with_suffix(".edited.mp4")
+    if rendered.exists():
+        st.session_state.rendered_path = rendered
+        msgs.append(f"✓ Found existing render `{rendered.name}`.")
+
+    return True, msgs
+
+
 # ─── 1. Source ────────────────────────────────────────────────────────────────
 st.header("1. Source")
-src_tab_upload, src_tab_path = st.tabs(["Upload file", "Path on disk"])
+src_tab_upload, src_tab_path, src_tab_resume = st.tabs(
+    ["Upload file", "Path on disk", "Resume from JSON"]
+)
 
 with src_tab_upload:
     uploaded = st.file_uploader(
@@ -209,6 +386,87 @@ with src_tab_path:
             _reset_downstream()
             st.session_state.source_path = p.resolve()
             st.success(f"Loaded `{p}`")
+
+with src_tab_resume:
+    st.caption(
+        "Jump back into an existing project. Drop in your `*.analysis.json` "
+        "(required) plus any `*.classified.json` / `*.plan.json` you already "
+        "have — we'll cascade-load them. The source video is also optional: "
+        "if it's still at the path stored inside the analysis JSON, leave it "
+        "blank; otherwise drop the file in below."
+    )
+
+    uploaded_jsons = st.file_uploader(
+        "JSON artifacts (drag in analysis + classified + plan together)",
+        type=["json"],
+        accept_multiple_files=True,
+        key="resume_jsons",
+        help="At minimum you need an analysis JSON. Classified/plan JSONs are "
+             "optional — drop them in to skip those stages.",
+    )
+
+    uploaded_source = st.file_uploader(
+        "Source video (optional — only if the path inside the analysis JSON "
+        "doesn't resolve anymore)",
+        type=["mov", "mp4", "mkv", "m4v", "avi", "webm"],
+        key="resume_source",
+    )
+
+    if st.button("Resume", type="primary"):
+        if not uploaded_jsons:
+            st.error("Upload at least one JSON file (the analysis JSON).")
+        else:
+            # Persist uploads to a stable temp dir so the cascade loader can
+            # find sibling files alongside the analysis JSON by name.
+            upload_dir = Path(tempfile.gettempdir()) / "video_editor_uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+
+            saved_paths: list[Path] = []
+            for up in uploaded_jsons:
+                dest = upload_dir / up.name
+                dest.write_bytes(up.getbuffer())
+                saved_paths.append(dest)
+
+            # Identify the analysis JSON: prefer .analysis.json suffix; fall
+            # back to whichever uploaded file parses as an AnalysisBundle.
+            analysis_path: Path | None = None
+            for p in saved_paths:
+                if p.name.endswith(".analysis.json"):
+                    analysis_path = p
+                    break
+            if analysis_path is None:
+                for p in saved_paths:
+                    try:
+                        AnalysisBundle.model_validate_json(p.read_text())
+                        analysis_path = p
+                        break
+                    except Exception:
+                        continue
+
+            if analysis_path is None:
+                st.error(
+                    "Couldn't find an analysis JSON in the upload. "
+                    "Expected one file ending in `.analysis.json` or matching "
+                    "the analysis bundle shape."
+                )
+            else:
+                # Optional source override: save the uploaded video to disk.
+                src_override = None
+                if uploaded_source is not None:
+                    src_dest = upload_dir / uploaded_source.name
+                    src_dest.write_bytes(uploaded_source.getbuffer())
+                    src_override = src_dest
+
+                ok, msgs = _resume_from_analysis(analysis_path, src_override)
+                for m in msgs:
+                    if m.startswith("✓"):
+                        st.success(m)
+                    elif m.startswith("⚠"):
+                        st.warning(m)
+                    else:
+                        st.error(m)
+                if ok:
+                    st.rerun()
 
 # ─── 2. Probe ─────────────────────────────────────────────────────────────────
 if st.session_state.source_path is not None:
@@ -959,8 +1217,9 @@ if (
 if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is not None:
     st.header("10. Render to MP4")
     st.caption(
-        "Executes the cut plan against the source video. libx264 + AAC, "
-        "audio fade-in/out at every cut for click-free joins. Slow but quality-first."
+        "Executes the cut plan against the source video. Hardware-accelerated "
+        "by default on Apple Silicon — typically 10–30× faster than CPU "
+        "encoding, with quality YouTube can't tell apart after its own re-encode."
     )
 
     plan_now: CutPlan = st.session_state.cut_plan
@@ -970,21 +1229,18 @@ if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is
 
     rc1, rc2 = st.columns(2)
     with rc1:
-        crf = st.slider(
-            "Video quality (CRF)",
-            min_value=14, max_value=28, value=18, step=1,
-            help="Lower = better quality, bigger file. 18 ≈ visually lossless; "
-                 "23 is YouTube default-ish.",
+        archival = st.toggle(
+            "Archival quality (libx264, ~10× slower)",
+            value=False,
+            help=(
+                "Off (recommended): hardware-accelerated h264_videotoolbox at "
+                "high quality. On: software libx264 -preset slow -crf 18 — "
+                "near-lossless CPU encode. YouTube re-encodes both anyway; "
+                "the visual difference is essentially zero for screen-recording "
+                "content."
+            ),
         )
-        preset = st.selectbox(
-            "Encoder preset (speed vs compression)",
-            options=[
-                "ultrafast", "superfast", "veryfast", "faster",
-                "fast", "medium", "slow", "slower", "veryslow",
-            ],
-            index=6,  # slow
-            help="Slower presets compress more efficiently at the same quality.",
-        )
+        encoder_choice = "libx264" if archival else "auto"
     with rc2:
         audio_bitrate = st.selectbox(
             "Audio bitrate (AAC)",
@@ -1015,8 +1271,7 @@ if st.session_state.cut_plan is not None and st.session_state.analysis_bundle is
                 plan=plan_now,
                 output_path=out_path,
                 audio_track_index=audio_track,
-                video_crf=crf,
-                video_preset=preset,
+                encoder=encoder_choice,  # type: ignore[arg-type]
                 audio_bitrate=audio_bitrate,
                 progress=on_render_progress,
             )
