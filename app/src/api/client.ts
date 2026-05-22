@@ -70,6 +70,7 @@ export const api = {
   plan: (req: {
     analysis_path: string;
     classified_path?: string;
+    overrides?: Record<string, string>;  // "pause:5" → "keep" etc.
     crossfade_ms?: number;
     filler_pad_ms?: number;
     default_breath_ms?: number;
@@ -161,6 +162,39 @@ export const api = {
     `&start=${start}&end=${end}&pad=${pad}`,
 
   // ─── Bundle loads ──────────────────────────────────────────────────────
+  getClassification: (path: string) =>
+    jsonFetch<{
+      pause_candidates: { id: number; start: number; end: number }[];
+      filler_candidates: {
+        id: number;
+        word_index: number;
+        text: string;
+        start: number;
+        end: number;
+      }[];
+      classification: {
+        pauses: {
+          id: number;
+          category: string;
+          action: "cut" | "trim" | "keep";
+          trim_to_ms: number | null;
+          reason: string;
+        }[];
+        fillers: {
+          id: number;
+          action: "cut" | "keep";
+          reason: string;
+        }[];
+        retakes: {
+          cut_start: number;
+          cut_end: number;
+          keep_start: number;
+          keep_end: number;
+          reason: string;
+        }[];
+      };
+    }>(`/classification?path=${encodeURIComponent(path)}`),
+
   getPlan: (path: string) =>
     jsonFetch<{
       source_duration: number;

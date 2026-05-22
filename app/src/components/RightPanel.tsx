@@ -2,7 +2,11 @@ import { useProject } from "../stores/project";
 import { usePipeline } from "../hooks/usePipeline";
 import type { JobState, PipelineState } from "../stores/project";
 
-export function RightPanel() {
+interface Props {
+  onOpenReview: () => void;
+}
+
+export function RightPanel({ onOpenReview }: Props) {
   const media = useProject((s) => s.media);
   const active = useProject((s) => s.activeMediaPath);
   const item = media.find((m) => m.path === active);
@@ -98,6 +102,28 @@ export function RightPanel() {
                 job={item.job}
                 onRun={() => runStage("render")}
               />
+            </Section>
+
+            <Section title="Review">
+              <button
+                onClick={onOpenReview}
+                disabled={!item.pipeline.classifiedPath}
+                className="w-full text-left px-2 py-2 rounded-md hover:bg-bg-elevated disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                title={
+                  item.pipeline.classifiedPath
+                    ? "Review and override classifier decisions"
+                    : "Classify first to enable review"
+                }
+              >
+                <div className="text-sm font-medium flex items-center gap-2">
+                  <span>🎚</span> Review &amp; refine cuts
+                </div>
+                <div className="text-[10px] text-text-muted">
+                  {item.pipeline.classifiedPath
+                    ? "Per-cut audio + override + re-plan"
+                    : "Classify first to enable"}
+                </div>
+              </button>
             </Section>
 
             <Section title="Output paths">

@@ -4,12 +4,24 @@ import { MediaBrowser } from "./components/MediaBrowser";
 import { Canvas } from "./components/Canvas";
 import { RightPanel } from "./components/RightPanel";
 import { Timeline } from "./components/Timeline";
+import { ReviewPanel } from "./components/ReviewPanel";
 import { api } from "./api/client";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   useKeyboardShortcuts();
+
+  // Close review on Esc
+  useEffect(() => {
+    if (!reviewOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setReviewOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [reviewOpen]);
 
   // Ping the sidecar on mount. The Tauri shell will later wait on /health
   // before showing the window; in browser dev mode we just show a status
@@ -37,11 +49,17 @@ export default function App() {
       <TopBar serverOk={serverOk} />
       <div className="flex-1 flex min-h-0">
         <MediaBrowser />
-        <main className="flex-1 flex flex-col min-w-0">
-          <Canvas />
-          <Timeline />
+        <main className="flex-1 flex flex-col min-w-0 relative">
+          {reviewOpen ? (
+            <ReviewPanel onClose={() => setReviewOpen(false)} />
+          ) : (
+            <>
+              <Canvas />
+              <Timeline />
+            </>
+          )}
         </main>
-        <RightPanel />
+        <RightPanel onOpenReview={() => setReviewOpen(true)} />
       </div>
     </div>
   );

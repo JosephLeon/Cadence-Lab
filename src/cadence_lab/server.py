@@ -269,6 +269,10 @@ def probe_endpoint(req: ProbeRequest) -> ProbeResponse:
 class PlanRequest(BaseModel):
     analysis_path: str
     classified_path: str | None = None  # default: derive from output_dir
+    # Per-classifier-item user overrides applied before planning. Key shape:
+    # "pause:5" → "keep" | "trim" | "cut", "filler:3" → "keep" | "cut",
+    # "retake:0" → "reject". Used by the review panel for re-plans.
+    overrides: dict[str, str] | None = None
     crossfade_ms: int = 20
     filler_pad_ms: int = 20
     default_breath_ms: int = 150
@@ -295,6 +299,14 @@ def plan_endpoint(req: PlanRequest) -> PlanResponse:
     if not cp.exists():
         raise HTTPException(404, f"classification not found: {cp}")
     cls_bundle = ClassificationBundle.model_validate_json(cp.read_text())
+
+    # Apply review-panel overrides (if any) without writing back to disk —
+    # the classification.json stays the canonical original; overrides only
+    # affect the resulting plan.
+    if req.overrides:
+        parsed = {_parse_override_key(k): v for k, v in req.overrides.items()}
+        modified = apply_overrides(cls_bundle.classification, parsed)  # type: ignore[arg-type]
+        cls_bundle = cls_bundle.model_copy(update={"classification": modified})
 
     plan = plan_cuts(
         speech=bundle.speech,

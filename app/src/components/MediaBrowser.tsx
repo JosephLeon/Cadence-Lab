@@ -40,6 +40,13 @@ export function MediaBrowser() {
     mutationFn: (path: string) => api.probe(path),
     onSuccess: (res, path) => {
       const p = res.paths;
+      // Derive the mic WAV path: same directory and stem as the source,
+      // with a fixed suffix — matches what paths.mic_wav_path() writes.
+      // (Could ask the server explicitly, but this naming is stable.)
+      const stem = path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+      const dir = p.analysis.substring(0, p.analysis.lastIndexOf("/"));
+      const micWavPath = `${dir}/${stem}.mic.16k.wav`;
+
       updateMedia(path, {
         probe: res.source,
         canonical: p,
@@ -49,6 +56,7 @@ export function MediaBrowser() {
           classifiedPath: p.classified_exists ? p.classified : undefined,
           planPath: p.plan_exists ? p.plan : undefined,
           renderedPath: p.rendered_exists ? p.rendered : undefined,
+          micWavPath: p.analysis_exists ? micWavPath : undefined,
         },
       });
     },

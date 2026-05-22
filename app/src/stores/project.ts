@@ -13,7 +13,18 @@ export interface PipelineState {
   classifiedPath?: string;
   planPath?: string;
   renderedPath?: string;
+  /** Mic-only 16k WAV produced during ingest; used for per-cut audio clips. */
+  micWavPath?: string;
 }
+
+/**
+ * Per-classifier-item override decisions. Key format matches the backend:
+ *   - "pause:5" → "cut" | "trim" | "keep"
+ *   - "filler:3" → "cut" | "keep"
+ *   - "retake:0" → "reject"
+ * Absent key = use classifier's original decision.
+ */
+export type OverrideMap = Record<string, string>;
 
 /** Per-media job state. Only one stage at a time runs against a single clip. */
 export interface JobState {
@@ -38,6 +49,8 @@ export interface MediaItem {
   pipeline: PipelineState;
   /** Active job, if any */
   job: JobState | null;
+  /** Pending review overrides (cleared after Apply or Reset) */
+  overrides: OverrideMap;
 }
 
 /** Playback state for the active video. */
@@ -57,6 +70,8 @@ interface ProjectState {
   removeMedia: (path: string) => void;
   setActive: (path: string | null) => void;
   setPlayback: (patch: Partial<PlaybackState>) => void;
+  setOverride: (mediaPath: string, key: string, value: string | null) => void;
+  clearOverrides: (mediaPath: string) => void;
 }
 
 export const useProject = create<ProjectState>((set) => ({
@@ -79,6 +94,7 @@ export const useProject = create<ProjectState>((set) => ({
             status: "loading",
             pipeline: {},
             job: null,
+            overrides: {},
           },
         ],
         activeMediaPath: s.activeMediaPath ?? path,
@@ -104,4 +120,26 @@ export const useProject = create<ProjectState>((set) => ({
       // sit at an inherited position from the previous video.
       playback: { currentTime: 0, duration: 0, isPlaying: false },
     }),
+
+  setOverride: (mediaPath, key, value) =>
+    set((s) => ({
+      media: s.media.map((m) => {
+        if (m.path !== mediaPath) return m;
+        const next = { ...m.overrides };
+        // Passing `null` clears the override (revert to classifier default).
+        if (value === null) {
+          delete next[key];
+        } else {
+          next[key] = value;
+        }
+        return { ...m, overrides: next };
+      }),
+    })),
+
+  clearOverrides: (mediaPath) =>
+    set((s) => ({
+      media: s.media.map((m) =>
+        m.path === mediaPath ? { ...m, overrides: {} } : m,
+      ),
+    })),
 }));
