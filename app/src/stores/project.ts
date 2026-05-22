@@ -40,19 +40,32 @@ export interface MediaItem {
   job: JobState | null;
 }
 
+/** Playback state for the active video. */
+export interface PlaybackState {
+  currentTime: number;
+  duration: number;
+  isPlaying: boolean;
+}
+
 interface ProjectState {
   media: MediaItem[];
   activeMediaPath: string | null;
+  playback: PlaybackState;
 
   addMedia: (path: string) => void;
   updateMedia: (path: string, patch: Partial<MediaItem>) => void;
   removeMedia: (path: string) => void;
   setActive: (path: string | null) => void;
+  setPlayback: (patch: Partial<PlaybackState>) => void;
 }
 
 export const useProject = create<ProjectState>((set) => ({
   media: [],
   activeMediaPath: null,
+  playback: { currentTime: 0, duration: 0, isPlaying: false },
+
+  setPlayback: (patch) =>
+    set((s) => ({ playback: { ...s.playback, ...patch } })),
 
   addMedia: (path) =>
     set((s) => {
@@ -84,5 +97,11 @@ export const useProject = create<ProjectState>((set) => ({
         s.activeMediaPath === path ? null : s.activeMediaPath,
     })),
 
-  setActive: (path) => set({ activeMediaPath: path }),
+  setActive: (path) =>
+    set({
+      activeMediaPath: path,
+      // Reset playback when switching clips so the timeline cursor doesn't
+      // sit at an inherited position from the previous video.
+      playback: { currentTime: 0, duration: 0, isPlaying: false },
+    }),
 }));

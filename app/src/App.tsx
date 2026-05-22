@@ -5,9 +5,11 @@ import { Canvas } from "./components/Canvas";
 import { RightPanel } from "./components/RightPanel";
 import { Timeline } from "./components/Timeline";
 import { api } from "./api/client";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
+  useKeyboardShortcuts();
 
   // Ping the sidecar on mount. The Tauri shell will later wait on /health
   // before showing the window; in browser dev mode we just show a status

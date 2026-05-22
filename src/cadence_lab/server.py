@@ -560,6 +560,26 @@ def serve_output_file(name: str) -> FileResponse:
     return FileResponse(target)
 
 
+@app.get("/source")
+def serve_source(path: str = Query(..., description="Absolute path to source video")) -> FileResponse:
+    """Stream a source video for the frontend ``<video>`` element.
+
+    Unlike ``/files/{name}`` (which restricts to ``output_dir()``), this serves
+    any file the user explicitly loaded as a media source. For a single-user
+    desktop sidecar that's the right tradeoff — the user picked the file, we
+    just need to play it back.
+
+    FastAPI's ``FileResponse`` supports HTTP range requests automatically,
+    which is what ``<video>`` uses to seek without downloading the whole file.
+    """
+    src = Path(path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+    if not src.is_file():
+        raise HTTPException(400, "not a file")
+    return FileResponse(src)
+
+
 @app.get("/audio-clip")
 def audio_clip(
     audio_path: str = Query(..., description="Absolute path to source audio"),

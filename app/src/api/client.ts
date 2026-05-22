@@ -119,9 +119,23 @@ export const api = {
   // ─── Media URLs (no fetch needed; use directly as src) ─────────────────
   fileUrl: (name: string) => `${BASE}/files/${encodeURIComponent(name)}`,
 
+  /** URL for the user-loaded source video (used by <video src=...>) */
+  sourceUrl: (path: string) =>
+    `${BASE}/source?path=${encodeURIComponent(path)}`,
+
   audioClipUrl: (audio_path: string, start: number, end: number, pad = 1.5) =>
     `${BASE}/audio-clip?audio_path=${encodeURIComponent(audio_path)}` +
     `&start=${start}&end=${end}&pad=${pad}`,
+
+  // ─── Bundle loads ──────────────────────────────────────────────────────
+  getPlan: (path: string) =>
+    jsonFetch<{
+      source_duration: number;
+      output_duration: number;
+      keeps: { source_start: number; source_end: number }[];
+      cuts: { source_start: number; source_end: number; kind: string; reason: string }[];
+      params: { crossfade_ms: number; filler_pad_ms: number; default_breath_ms: number; min_keep_ms: number };
+    }>(`/plan-bundle?path=${encodeURIComponent(path)}`),
 };
 
 export { APIError };
