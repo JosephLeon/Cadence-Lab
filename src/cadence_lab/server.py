@@ -189,8 +189,41 @@ class ProbeRequest(BaseModel):
     source_path: str
 
 
+class CanonicalPaths(BaseModel):
+    """Where each pipeline artifact would land for a given source — and
+    whether it already exists on disk. Lets the frontend show "this is
+    already analyzed/classified/rendered" without each client having to
+    know the output-dir convention."""
+    analysis: str
+    classified: str
+    plan: str
+    rendered: str
+    analysis_exists: bool
+    classified_exists: bool
+    plan_exists: bool
+    rendered_exists: bool
+
+
 class ProbeResponse(BaseModel):
     source: SourceProbe
+    paths: CanonicalPaths
+
+
+def _canonical_paths(source: Path) -> CanonicalPaths:
+    ap = analysis_path(source)
+    cp = classified_path(source)
+    pp = plan_path(source)
+    rp = rendered_path(source)
+    return CanonicalPaths(
+        analysis=str(ap),
+        classified=str(cp),
+        plan=str(pp),
+        rendered=str(rp),
+        analysis_exists=ap.exists(),
+        classified_exists=cp.exists(),
+        plan_exists=pp.exists(),
+        rendered_exists=rp.exists(),
+    )
 
 
 @app.post("/probe", response_model=ProbeResponse)
@@ -199,7 +232,10 @@ def probe_endpoint(req: ProbeRequest) -> ProbeResponse:
     if not src.exists():
         raise HTTPException(404, f"source not found: {src}")
     try:
-        return ProbeResponse(source=probe(src))
+        return ProbeResponse(
+            source=probe(src),
+            paths=_canonical_paths(src),
+        )
     except IngestError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -213,8 +249,13 @@ class PlanRequest(BaseModel):
     min_keep_ms: int = 80
 
 
-@app.post("/plan", response_model=CutPlan)
-def plan_endpoint(req: PlanRequest) -> CutPlan:
+class PlanResponse(BaseModel):
+    plan: CutPlan
+    plan_path: str  # echo back the file we wrote to
+
+
+@app.post("/plan", response_model=PlanResponse)
+def plan_endpoint(req: PlanRequest) -> PlanResponse:
     ap = Path(req.analysis_path).expanduser()
     if not ap.exists():
         raise HTTPException(404, f"analysis not found: {ap}")
@@ -243,7 +284,7 @@ def plan_endpoint(req: PlanRequest) -> CutPlan:
     # Persist alongside the analysis so the next stage finds it.
     out = plan_path(bundle.ingest.source.path)
     out.write_text(json.dumps(plan.model_dump(mode="json"), indent=2))
-    return plan
+    return PlanResponse(plan=plan, plan_path=str(out))
 
 
 class OverridesRequest(BaseModel):

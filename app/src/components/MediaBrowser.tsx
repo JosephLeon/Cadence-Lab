@@ -23,7 +23,20 @@ export function MediaBrowser() {
   const probeMut = useMutation({
     mutationFn: (path: string) => api.probe(path),
     onSuccess: (res, path) => {
-      updateMedia(path, { probe: res.source, status: "ready" });
+      // Auto-populate pipeline state for any artifacts that already exist
+      // on disk — that way "I analyzed this yesterday" doesn't force a re-run.
+      const p = res.paths;
+      updateMedia(path, {
+        probe: res.source,
+        canonical: p,
+        status: "ready",
+        pipeline: {
+          analysisPath: p.analysis_exists ? p.analysis : undefined,
+          classifiedPath: p.classified_exists ? p.classified : undefined,
+          planPath: p.plan_exists ? p.plan : undefined,
+          renderedPath: p.rendered_exists ? p.rendered : undefined,
+        },
+      });
     },
     onError: (err: Error, path) => {
       updateMedia(path, { status: "error", error: err.message });

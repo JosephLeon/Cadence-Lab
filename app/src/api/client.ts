@@ -5,6 +5,7 @@ import type {
   JobEvent,
   JobHandle,
   JobStatusResponse,
+  PlanResponse,
   ProbeResponse,
 } from "./types";
 
@@ -62,6 +63,19 @@ export const api = {
 
   classify: (req: { analysis_path: string; min_pause_ms?: number }) =>
     jsonFetch<JobHandle>("/classify", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  plan: (req: {
+    analysis_path: string;
+    classified_path?: string;
+    crossfade_ms?: number;
+    filler_pad_ms?: number;
+    default_breath_ms?: number;
+    min_keep_ms?: number;
+  }) =>
+    jsonFetch<PlanResponse>("/plan", {
       method: "POST",
       body: JSON.stringify(req),
     }),

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SourceProbe } from "../api/types";
+import type { CanonicalPaths, SourceProbe } from "../api/types";
 
 /**
  * Project state — the in-memory model of what the user is currently editing.
@@ -7,14 +7,37 @@ import type { SourceProbe } from "../api/types";
  * later concern.
  */
 
+/** Per-media pipeline state. Tracks which stages have a known output path. */
+export interface PipelineState {
+  analysisPath?: string;
+  classifiedPath?: string;
+  planPath?: string;
+  renderedPath?: string;
+}
+
+/** Per-media job state. Only one stage at a time runs against a single clip. */
+export interface JobState {
+  stage: "analyze" | "classify" | "plan" | "render";
+  jobId?: string;       // undefined for sync stages (plan)
+  progress: number;
+  message: string;
+  error?: string;
+}
+
 export interface MediaItem {
   /** Absolute path on the user's filesystem */
   path: string;
   /** Probe info; null while loading or if probe failed */
   probe: SourceProbe | null;
+  /** Canonical output paths for this source */
+  canonical?: CanonicalPaths;
   /** Loading / error state for the initial probe */
   status: "loading" | "ready" | "error";
   error?: string;
+  /** Pipeline artifact paths — populated by stage completions */
+  pipeline: PipelineState;
+  /** Active job, if any */
+  job: JobState | null;
 }
 
 interface ProjectState {
@@ -35,7 +58,16 @@ export const useProject = create<ProjectState>((set) => ({
     set((s) => {
       if (s.media.some((m) => m.path === path)) return s;
       return {
-        media: [...s.media, { path, probe: null, status: "loading" }],
+        media: [
+          ...s.media,
+          {
+            path,
+            probe: null,
+            status: "loading",
+            pipeline: {},
+            job: null,
+          },
+        ],
         activeMediaPath: s.activeMediaPath ?? path,
       };
     }),

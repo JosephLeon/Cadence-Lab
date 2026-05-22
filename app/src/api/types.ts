@@ -25,8 +25,49 @@ export interface SourceProbe {
   audio_tracks: AudioTrack[];
 }
 
+export interface CanonicalPaths {
+  analysis: string;
+  classified: string;
+  plan: string;
+  rendered: string;
+  analysis_exists: boolean;
+  classified_exists: boolean;
+  plan_exists: boolean;
+  rendered_exists: boolean;
+}
+
 export interface ProbeResponse {
   source: SourceProbe;
+  paths: CanonicalPaths;
+}
+
+// Stage outputs (what the job.result has on success)
+export interface AnalyzeResult {
+  analysis_path: string;
+}
+export interface ClassifyResult {
+  classified_path: string;
+}
+export interface RenderResult {
+  rendered_path: string;
+  size_bytes: number;
+}
+
+export interface PlanSummary {
+  source_duration: number;
+  output_duration: number;
+  keeps_count: number;
+  cuts_count: number;
+}
+
+export interface PlanResponse {
+  plan: {
+    source_duration: number;
+    output_duration: number;
+    keeps: unknown[];
+    cuts: unknown[];
+  };
+  plan_path: string;
 }
 
 export interface JobHandle {
