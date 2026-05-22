@@ -137,11 +137,16 @@ brew install ffmpeg uv
 ```sh
 git clone https://github.com/JosephLeon/cadence-lab.git
 cd cadence-lab
+
+# Python pipeline + sidecar
 uv sync
 cp .env.example .env       # then add your keys
 
-# Frontend (optional today, required once the desktop app ships):
+# Frontend + Tauri desktop app
 cd app && bun install && cd ..
+
+# Optional — install Rust if you don't have it (for the Tauri shell)
+# brew install rust
 ```
 
 You need two API keys:
@@ -155,7 +160,18 @@ You need two API keys:
 
 ### Launch
 
-**Desktop app (work in progress — Phase 2 in progress):**
+**Desktop app (one command — Tauri spawns everything):**
+
+```sh
+cd app && bun tauri:dev
+```
+
+Opens a native window. Tauri's `beforeDevCommand` starts the Vite dev server;
+the Rust shell spawns the Python FastAPI sidecar (`uv run cadence-lab server`)
+and kills it on app close. First run takes a few minutes to compile the
+Rust shell; subsequent runs are instant.
+
+**Dev mode without Tauri (still useful for frontend-only iteration):**
 
 ```sh
 # Terminal 1 — Python sidecar (FastAPI)
@@ -165,8 +181,8 @@ uv run cadence-lab server
 cd app && bun dev
 ```
 
-Open <http://localhost:1420>. Three-pane editor shell. Eventually wrapped in
-Tauri as a native window — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Open <http://localhost:1420>. Same UI, in a browser tab instead of a
+native window.
 
 **Legacy Streamlit UI** (still works, being phased out):
 

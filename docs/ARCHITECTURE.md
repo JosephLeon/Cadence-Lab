@@ -150,48 +150,77 @@ Path the frontend will live in: `app/` (alongside `src/cadence_lab/`).
 Decision deferred: Vite + React-Router vs Next.js. Vite is the simpler choice
 for a desktop-bundled app where SSR/routing aren't load-bearing.
 
-## Tauri wrapper (Phase 3+)
+## Tauri wrapper (Phase 7 — landed)
 
-The Tauri Rust shell will:
+The Tauri Rust shell lives in `app/src-tauri/`. Its responsibilities:
 
-1. Spawn the FastAPI sidecar on app startup. Either bundled via PyInstaller
-   or relying on `uv` being installed (dev mode).
-2. Wait for `GET /health` to succeed before showing the window.
-3. Load the React frontend (either from a bundled static build in production
-   or from the Vite dev server URL in development).
-4. Kill the sidecar process on app shutdown.
+1. Spawn the FastAPI sidecar (`uv run cadence-lab server`) on app launch
+   from a `setup` hook. Walks up from the binary's executable path to find
+   `pyproject.toml` and runs `uv` in that directory.
+2. Manage the `Child` handle in app state (`SidecarHandle(Mutex<Option<Child>>)`).
+3. On `RunEvent::ExitRequested` / `Exit`, take the handle, kill the process,
+   and wait — so closing the app stops the backend too (no orphans).
+4. Show the React UI inside a native WKWebView on macOS.
 
-The sidecar pattern is documented in [Tauri's sidecar guide](https://tauri.app/v1/guides/building/sidecar/).
-We'll cross that bridge in Phase 3 — the FastAPI server doesn't need to know
-or care that it's eventually going to be sidecar-launched.
+Code: [`app/src-tauri/src/lib.rs`](../app/src-tauri/src/lib.rs).
+
+### Dev vs production sidecar bundling — current state
+
+| Mode | How the sidecar runs | Status |
+|---|---|---|
+| `tauri dev` | Rust shell spawns `uv run cadence-lab server` from the workspace root | ✅ working — used today |
+| `tauri build` (.dmg) | Same spawn, requires `uv` + `cadence-lab` installed on the user's machine | ⚠ works but user-dependent |
+| Fully self-contained `.dmg` | PyInstaller-frozen sidecar binary, bundled as a Tauri `externalBin` and shipped inside the .app | ⏳ deferred |
+
+The deferred work — full self-contained bundle — needs:
+
+- **PyInstaller (or Nuitka) to freeze the Python sidecar** to a single binary.
+  Will need careful handling of native deps with non-trivial loaders:
+  faster-whisper (uses ctranslate2 with bundled .so/.dll), silero-vad
+  (PyTorch + ONNX), soundfile (libsndfile), the ffmpeg subprocess (need to
+  bundle a static ffmpeg too, or document that the user installs it).
+- **Tauri externalBin configuration** to embed the frozen binary at a known
+  relative path inside the bundle.
+- **Update spawn_sidecar() in lib.rs** to find the bundled binary via
+  `app_handle.path().resource_dir()` instead of `uv run`.
+- **Code signing + notarization** if shipping to non-developer users.
+
+Not blocking for current development use. Today the workflow is "I install
+the Python package via `uv sync` once, then `bun tauri dev` gives me a
+working desktop app." That's enough to keep building features against.
 
 ## Repository layout (current and projected)
 
 ```
 cadence-lab/
-├── src/cadence_lab/          # Python pipeline + FastAPI sidecar
-│   ├── server.py             # ✅ Phase 1 — the FastAPI app
-│   ├── paths.py              # ✅ output dir + per-stage path helpers
-│   ├── ingest.py             # ✅ pipeline stages, unchanged
+├── src/cadence_lab/                    # Python pipeline + FastAPI sidecar
+│   ├── server.py                       # ✅ FastAPI sidecar (REST + SSE)
+│   ├── paths.py                        # ✅ output dir + per-stage path helpers
+│   ├── ingest.py                       # ✅ pipeline stages
 │   ├── speech.py
 │   ├── classifier.py
 │   ├── planner.py
 │   ├── renderer.py
 │   ├── reviewer.py
-│   ├── ui.py                 # ⚠️ legacy Streamlit — kept until Tauri ships
-│   ├── cli.py                # ✅ + `server` subcommand
+│   ├── ui.py                           # ⚠️ legacy Streamlit — being phased out
+│   ├── cli.py                          # ✅ + `server`, `migrate` subcommands
 │   └── ...
-├── app/                      # ⏳ Phase 2 — React frontend
-│   ├── src/
-│   ├── index.html
+├── app/                                # ✅ Frontend + Tauri shell
+│   ├── src/                            # ✅ React + TypeScript
+│   │   ├── components/                 # TopBar, MediaBrowser, Canvas, Timeline, RightPanel, ReviewPanel
+│   │   ├── hooks/                      # usePipeline, useKeyboardShortcuts
+│   │   ├── stores/                     # project, videoRef, planCache
+│   │   ├── api/                        # typed FastAPI client
+│   │   └── ...
+│   ├── src-tauri/                      # ✅ Tauri Rust shell
+│   │   ├── src/lib.rs                  # sidecar spawn + lifecycle
+│   │   ├── Cargo.toml
+│   │   └── tauri.conf.json
 │   ├── vite.config.ts
 │   └── package.json
-├── src-tauri/                # ⏳ Phase 3 — Tauri Rust shell
-│   ├── Cargo.toml
-│   └── tauri.conf.json
 ├── pyproject.toml
 └── docs/
-    └── ARCHITECTURE.md       # this file
+    └── ARCHITECTURE.md                 # this file
 ```
 
 ## Decision log

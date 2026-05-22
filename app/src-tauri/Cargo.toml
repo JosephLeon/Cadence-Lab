@@ -1,0 +1,23 @@
+[package]
+name = "cadence-lab"
+version = "0.1.0"
+description = "AI-driven semantic video editor"
+authors = ["Joseph Leon"]
+license = "MIT"
+repository = "https://github.com/JosephLeon/cadence-lab"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "cadence_lab_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.2", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.2", features = [] }
+tauri-plugin-log = "2"

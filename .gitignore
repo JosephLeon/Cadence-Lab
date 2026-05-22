@@ -28,6 +28,10 @@ app/dist/
 app/.vite/
 app/*.log
 
+# Tauri (Rust shell)
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
 # Secrets — load via python-dotenv from .env (template is .env.example)
 .env
 .env.local
