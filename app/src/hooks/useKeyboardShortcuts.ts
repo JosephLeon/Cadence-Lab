@@ -1,12 +1,16 @@
 import { useEffect } from "react";
 import { videoRef } from "../stores/videoRef";
+import { planCache } from "../stores/planCache";
 
 /**
- * Global keyboard shortcuts for video playback. Intentionally minimal:
- * - **Space**: play/pause
- * - **Left / Right**: seek ±5 s
- * - **Shift+Left / Shift+Right**: seek ±1 s (frame-ish)
- * - **J / L**: seek ±10 s (Premiere convention)
+ * Global keyboard shortcuts for video playback + cut navigation:
+ *
+ * - **Space** — play/pause
+ * - **Left / Right** — seek ±5 s
+ * - **Shift+Left / Shift+Right** — seek ±1 s (frame-ish)
+ * - **J / L** — seek ±10 s (Premiere convention)
+ * - **`,` (comma)** — jump to previous cut boundary
+ * - **`.` (period)** — jump to next cut boundary
  *
  * Skipped when focus is inside an editable element so typing into the
  * command bar doesn't toggle playback.
@@ -48,6 +52,18 @@ export function useKeyboardShortcuts() {
           e.preventDefault();
           videoRef.seek(v.currentTime + 10);
           break;
+        case "Comma": {
+          e.preventDefault();
+          const t = planCache.prev(v.currentTime);
+          if (t !== undefined) videoRef.seek(t);
+          break;
+        }
+        case "Period": {
+          e.preventDefault();
+          const t = planCache.next(v.currentTime);
+          if (t !== undefined) videoRef.seek(t);
+          break;
+        }
       }
     };
     window.addEventListener("keydown", onKey);

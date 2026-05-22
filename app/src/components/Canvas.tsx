@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useProject } from "../stores/project";
 import { videoRef } from "../stores/videoRef";
 import { api } from "../api/client";
@@ -10,6 +10,8 @@ function fmtTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+type View = "source" | "edited";
+
 export function Canvas() {
   const media = useProject((s) => s.media);
   const active = useProject((s) => s.activeMediaPath);
@@ -18,15 +20,33 @@ export function Canvas() {
   const item = media.find((m) => m.path === active);
 
   const elRef = useRef<HTMLVideoElement | null>(null);
+  const [view, setView] = useState<View>("source");
 
-  // Mount/unmount: register the <video> element with the shared ref so the
-  // Timeline (and keyboard shortcuts) can drive it imperatively.
+  // If the user switched clips or the rendered file disappeared, snap back
+  // to source so we don't try to load a stale URL.
+  useEffect(() => {
+    if (view === "edited" && !item?.pipeline.renderedPath) {
+      setView("source");
+    }
+  }, [view, item?.pipeline.renderedPath]);
+
+  // Pick the correct URL based on view mode. The rendered MP4 lives under
+  // the output dir, so we serve it via /files/<relative>; source uses the
+  // arbitrary-path /source endpoint.
+  const videoUrl = (() => {
+    if (!item) return undefined;
+    if (view === "edited" && item.pipeline.renderedPath) {
+      return api.sourceUrl(item.pipeline.renderedPath);
+    }
+    return api.sourceUrl(item.path);
+  })();
+
+  // Register the <video> element with the shared ref + wire its events.
   useEffect(() => {
     videoRef.set(elRef.current);
     return () => videoRef.set(null);
-  }, [active]);
+  }, [active, view]);
 
-  // Wire <video> events → Zustand playback state.
   useEffect(() => {
     const v = elRef.current;
     if (!v) return;
@@ -44,7 +64,7 @@ export function Canvas() {
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
     };
-  }, [active, setPlayback]);
+  }, [active, view, setPlayback]);
 
   if (!item) {
     return (
@@ -59,16 +79,57 @@ export function Canvas() {
     );
   }
 
+  const hasRender = !!item.pipeline.renderedPath;
+
   return (
     <div className="flex-1 flex flex-col bg-bg min-h-0">
+      {/* View toggle — source vs edited (when rendered MP4 exists) */}
+      <div className="shrink-0 border-b border-border bg-bg-panel px-4 py-2 flex items-center gap-3">
+        <div className="inline-flex rounded-md border border-border overflow-hidden">
+          <button
+            onClick={() => setView("source")}
+            className={
+              "px-3 py-1 text-xs font-medium transition-colors " +
+              (view === "source"
+                ? "bg-accent text-white"
+                : "bg-bg text-text-secondary hover:bg-bg-elevated")
+            }
+          >
+            Source
+          </button>
+          <button
+            onClick={() => setView("edited")}
+            disabled={!hasRender}
+            className={
+              "px-3 py-1 text-xs font-medium transition-colors " +
+              (view === "edited"
+                ? "bg-accent text-white"
+                : hasRender
+                ? "bg-bg text-text-secondary hover:bg-bg-elevated"
+                : "bg-bg text-text-muted cursor-not-allowed opacity-50")
+            }
+            title={hasRender ? "Switch to rendered preview" : "Render first to enable"}
+          >
+            Edited
+          </button>
+        </div>
+
+        <span className="text-[10px] text-text-muted">
+          {view === "source"
+            ? "Showing source video"
+            : "Showing rendered output (with all cuts applied)"}
+        </span>
+      </div>
+
       {/* Canvas / preview area */}
       <div className="flex-1 flex items-center justify-center p-6 min-h-0">
         <div className="relative max-w-full max-h-full aspect-video bg-black rounded-md border border-border-subtle overflow-hidden shadow-xl">
           <video
-            // Force a remount on source change to clear cached state cleanly.
-            key={item.path}
+            // Force remount when switching source/edited or clip — otherwise
+            // the cached <video> shows the wrong file's first frame briefly.
+            key={`${item.path}::${view}`}
             ref={elRef}
-            src={api.sourceUrl(item.path)}
+            src={videoUrl}
             controls
             className="block w-full h-full"
             preload="metadata"
@@ -80,7 +141,8 @@ export function Canvas() {
       {item.probe && (
         <div className="shrink-0 border-t border-border bg-bg-panel px-4 py-2 flex items-center gap-4 text-xs text-text-secondary overflow-x-auto">
           <span className="font-mono">
-            {fmtTime(playback.currentTime)} / {fmtTime(playback.duration || item.probe.duration_seconds)}
+            {fmtTime(playback.currentTime)} /{" "}
+            {fmtTime(playback.duration || item.probe.duration_seconds)}
           </span>
           <div className="h-3 w-px bg-border" />
           <span className="truncate max-w-md" title={item.path}>
@@ -89,7 +151,9 @@ export function Canvas() {
           {item.probe.width && (
             <>
               <div className="h-3 w-px bg-border" />
-              <span>{item.probe.width}×{item.probe.height}</span>
+              <span>
+                {item.probe.width}×{item.probe.height}
+              </span>
             </>
           )}
           {item.probe.frame_rate && (
