@@ -92,12 +92,16 @@ Each stage writes a structured JSON file. The next stage reads it. You can
 stop at any stage, edit the JSON by hand if you want, and resume.
 
 ```
-files/                              ← default output directory (configurable)
-├── recording.analysis.json         ← stage 2 output: probe + transcript + VAD
-├── recording.classified.json       ← stage 3 output: per-pause/filler classifications
-├── recording.plan.json             ← stage 4 output: keep-segments + audit log
-├── recording.edited.mp4            ← stage 5 output: the final video
-└── recording.mic.16k.wav           ← intermediate: mic-only audio for VAD + Whisper
+files/                                  ← default output directory (configurable)
+├── recording/                          ← per-source subdir, named after source stem
+│   ├── recording.mov                   ← source (if uploaded; path-input sources stay where they are)
+│   ├── recording.analysis.json         ← stage 2: probe + transcript + VAD
+│   ├── recording.classified.json       ← stage 3: per-pause/filler classifications
+│   ├── recording.plan.json             ← stage 4: keep-segments + audit log
+│   ├── recording.edited.mp4            ← stage 5: the final video
+│   └── recording.mic.16k.wav           ← intermediate: mic-only audio
+└── episode-12/
+    └── ...
 ```
 
 The output directory is configurable via the `CADENCE_OUTPUT_DIR` environment
@@ -106,7 +110,13 @@ works out of the box. Useful overrides:
 
 - Keep sources on an external drive but outputs on local disk
 - Centralize outputs across many projects in one folder
-- Per-project output dirs for clean separation
+
+**Upgrading from an older flat layout:** earlier versions of Cadence Lab
+dropped all artifacts directly into `files/` without subdirectories. Run
+`uv run cadence-lab migrate --dry-run` to see what would move, then
+`uv run cadence-lab migrate` to actually apply. Old flat layouts continue to
+work without migration thanks to a backward-compat fallback in the probe
+endpoint — migrating is a tidiness fix, not a correctness one.
 
 ---
 

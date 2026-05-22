@@ -79,8 +79,10 @@ from .models import (
 from .paths import (
     analysis_path,
     classified_path,
+    legacy_flat_path,
     output_dir,
     plan_path,
+    project_dir,
     rendered_path,
 )
 from .planner import plan_cuts
@@ -210,10 +212,34 @@ class ProbeResponse(BaseModel):
 
 
 def _canonical_paths(source: Path) -> CanonicalPaths:
+    """Return per-source canonical paths, transparently falling back to the
+    legacy flat layout for any artifact that exists there but not in the
+    new per-source subdir."""
     ap = analysis_path(source)
     cp = classified_path(source)
     pp = plan_path(source)
     rp = rendered_path(source)
+
+    # Legacy fallback: if a file exists in the old flat location but not in
+    # the per-source subdir, surface the old path so existing projects keep
+    # working. Users can run `cadence-lab migrate` to move them in-place.
+    if not ap.exists():
+        lf = legacy_flat_path(source, ".analysis.json")
+        if lf.exists():
+            ap = lf
+    if not cp.exists():
+        lf = legacy_flat_path(source, ".classified.json")
+        if lf.exists():
+            cp = lf
+    if not pp.exists():
+        lf = legacy_flat_path(source, ".plan.json")
+        if lf.exists():
+            pp = lf
+    if not rp.exists():
+        lf = legacy_flat_path(source, ".edited.mp4")
+        if lf.exists():
+            rp = lf
+
     return CanonicalPaths(
         analysis=str(ap),
         classified=str(cp),
@@ -567,10 +593,14 @@ class UploadResponse(BaseModel):
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
-    """Stream an uploaded video to the configured output directory.
+    """Stream an uploaded video into a fresh per-source project directory.
+
+    For ``recording.mov`` this writes to ``<output_dir>/recording/recording.mov``,
+    so the upload itself bootstraps the project dir that subsequent pipeline
+    stages (analyze / classify / plan / render) will fill out.
 
     Writes to a temp filename first, then renames on success — partial files
-    from a failed/aborted upload don't pollute the output dir. Chunk size
+    from a failed/aborted upload don't pollute the project dir. Chunk size
     chosen to balance copy overhead vs memory footprint for multi-GB files.
 
     Once Tauri wraps this app, the frontend will use the native file dialog
@@ -579,9 +609,12 @@ async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
     """
     if not file.filename:
         raise HTTPException(400, "upload requires a filename")
-    out = output_dir()
-    final = out / file.filename
-    tmp = out / f".{file.filename}.upload"
+    # Treat the upload filename as a synthetic source so project_dir() lands
+    # it in the right per-source subdirectory.
+    pseudo_source = Path(file.filename)
+    dest_dir = project_dir(pseudo_source)
+    final = dest_dir / file.filename
+    tmp = dest_dir / f".{file.filename}.upload"
 
     CHUNK = 8 * 1024 * 1024  # 8 MB — empirically fast enough; memory OK
     try:

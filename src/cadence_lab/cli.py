@@ -33,7 +33,9 @@ from .models import (
 from .paths import (
     analysis_path,
     classified_path,
+    output_dir,
     plan_path,
+    project_dir,
     rendered_path,
 )
 from .planner import plan_cuts
@@ -386,6 +388,102 @@ def render_cmd(
         f"[green]✓[/green] [bold]{out_path}[/bold] "
         f"({size_mb:.1f} MB, {plan.output_duration:.1f}s, encoder: {encoder})"
     )
+
+
+@app.command("migrate")
+def migrate_cmd(
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Show what would move without actually moving anything.",
+        ),
+    ] = False,
+) -> None:
+    """Move existing flat-layout output files into per-source subdirectories.
+
+    The old layout put every project's artifacts directly in ``files/``:
+
+    \b
+        files/recording.mov
+        files/recording.analysis.json
+        files/recording.plan.json
+        files/recording.edited.mp4
+
+    The new layout (added 2026-05-21) groups them per source:
+
+    \b
+        files/recording/recording.mov
+        files/recording/recording.analysis.json
+        files/recording/recording.plan.json
+        files/recording/recording.edited.mp4
+
+    This command finds projects in the flat layout and moves them in place.
+    Existing per-source subdirs are left untouched. Safe to re-run.
+    """
+    base = output_dir()
+    # Suffixes that identify a pipeline artifact.
+    SUFFIXES = (
+        ".analysis.json",
+        ".classified.json",
+        ".plan.json",
+        ".edited.mp4",
+        ".mic.16k.wav",
+        # And common video sources — these get colocated when uploaded.
+        ".mov", ".mp4", ".mkv", ".m4v", ".avi", ".webm",
+    )
+
+    # Group files by their derived stem.
+    by_stem: dict[str, list[Path]] = {}
+    for entry in base.iterdir():
+        if not entry.is_file():
+            continue
+        name = entry.name
+        # Find which suffix this matches (longest match wins — .analysis.json
+        # before .json so we strip the right amount).
+        matched = next(
+            (s for s in sorted(SUFFIXES, key=len, reverse=True) if name.endswith(s)),
+            None,
+        )
+        if matched is None:
+            continue
+        stem = name[: -len(matched)]
+        by_stem.setdefault(stem, []).append(entry)
+
+    if not by_stem:
+        console.print("[dim]No flat-layout files found — nothing to migrate.[/dim]")
+        return
+
+    moved = 0
+    for stem, files in sorted(by_stem.items()):
+        target_dir = base / stem
+        console.print(
+            f"[bold]{stem}[/bold]  →  [dim]{target_dir}/[/dim]  "
+            f"({len(files)} file{'' if len(files) == 1 else 's'})"
+        )
+        if not dry_run:
+            target_dir.mkdir(exist_ok=True)
+        for src in files:
+            dest = target_dir / src.name
+            if dest.exists() and dest.resolve() == src.resolve():
+                # Already in place (e.g. dest is a symlink loop or same inode)
+                continue
+            if dest.exists():
+                console.print(
+                    f"  [yellow]⚠[/yellow] skip {src.name} — already in {target_dir.name}/"
+                )
+                continue
+            console.print(f"  → {src.name}")
+            if not dry_run:
+                src.rename(dest)
+            moved += 1
+
+    if dry_run:
+        console.print(f"\n[dim]Dry run — would move {moved} file(s). "
+                      f"Re-run without --dry-run to apply.[/dim]")
+    else:
+        console.print(f"\n[green]✓[/green] Moved {moved} file(s) into {len(by_stem)} "
+                      f"project director{'y' if len(by_stem) == 1 else 'ies'}.")
 
 
 @app.command("server")

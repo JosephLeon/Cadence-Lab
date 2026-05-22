@@ -3,15 +3,30 @@
 One source of truth for every file the pipeline writes: probe / analysis JSON,
 classification JSON, plan JSON, rendered MP4, intermediate mic WAV.
 
-Default destination is ``./files/`` (project-relative). Override with the
-``CADENCE_OUTPUT_DIR`` environment variable — useful if you keep videos on
-an external drive but want outputs on local disk, or you want one central
-location for many projects.
+Layout — **per-source subdirectory** under the configured output root:
 
-Naming is *flat by stem* — all artifacts for ``recording.mov`` land as
-``recording.analysis.json`` / ``recording.classified.json`` / etc. in the
-same directory. No per-source subdirectories — they add a level of nesting
-that isn't worth it until you're juggling hundreds of projects.
+```
+<CADENCE_OUTPUT_DIR or ./files>/
+├── recording-2026-05-21/
+│   ├── recording-2026-05-21.mov              (if uploaded; original location
+│   │                                          preserved if path-input)
+│   ├── recording-2026-05-21.analysis.json
+│   ├── recording-2026-05-21.classified.json
+│   ├── recording-2026-05-21.plan.json
+│   ├── recording-2026-05-21.edited.mp4
+│   └── recording-2026-05-21.mic.16k.wav
+├── episode-12/
+│   └── ...
+```
+
+Why per-source: with the flat layout, every new project added five-plus files
+to a single directory. After three projects you stop being able to scan the
+folder. Per-source means each project's artifacts live together — easy to
+delete, easy to back up, easy to share.
+
+All path helpers return *absolute* paths. Relative paths bite the moment
+something running in a different cwd needs to open them (e.g. the sidecar
+when launched via Tauri or systemd).
 """
 
 from __future__ import annotations
@@ -28,15 +43,12 @@ _ENV_VAR = "CADENCE_OUTPUT_DIR"
 
 
 def output_dir() -> Path:
-    """Return (and create) the directory where pipeline artifacts go.
+    """Return (and create) the *root* output directory.
 
-    Reads ``CADENCE_OUTPUT_DIR`` from the environment; falls back to
-    ``./files`` (resolved against the current working directory) so the tool
-    works without any config on a fresh checkout.
-
-    Always returns an absolute path — every API response that hands a file
-    location back to the frontend goes through here, and relative paths bite
-    the moment something running in a different cwd needs to open them.
+    Typically you want :func:`project_dir` instead — that returns the per-source
+    subdir where the actual artifacts live. ``output_dir`` is only useful when
+    you need to scan across projects (e.g. for the migration command) or are
+    looking up a file by full path that was already qualified.
     """
     base_str = os.getenv(_ENV_VAR, "").strip()
     base = Path(base_str).expanduser() if base_str else _DEFAULT_OUTPUT_DIR
@@ -44,26 +56,45 @@ def output_dir() -> Path:
     return base.resolve()
 
 
+def project_dir(source: Path) -> Path:
+    """Return (and create) the per-source project directory.
+
+    Keyed by the source file's stem — ``recording.mov`` → ``files/recording/``.
+    Used by every per-stage path helper below.
+    """
+    out = output_dir() / source.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 # ─── Per-stage path helpers ──────────────────────────────────────────────────
-# Every output path the pipeline writes goes through one of these. Keep
-# additions here so renaming a stage's file is a one-line change.
 
 
 def analysis_path(source: Path) -> Path:
-    return output_dir() / f"{source.stem}.analysis.json"
+    return project_dir(source) / f"{source.stem}.analysis.json"
 
 
 def classified_path(source: Path) -> Path:
-    return output_dir() / f"{source.stem}.classified.json"
+    return project_dir(source) / f"{source.stem}.classified.json"
 
 
 def plan_path(source: Path) -> Path:
-    return output_dir() / f"{source.stem}.plan.json"
+    return project_dir(source) / f"{source.stem}.plan.json"
 
 
 def rendered_path(source: Path) -> Path:
-    return output_dir() / f"{source.stem}.edited.mp4"
+    return project_dir(source) / f"{source.stem}.edited.mp4"
 
 
 def mic_wav_path(source: Path) -> Path:
-    return output_dir() / f"{source.stem}.mic.16k.wav"
+    return project_dir(source) / f"{source.stem}.mic.16k.wav"
+
+
+# ─── Backward-compat: legacy flat-layout lookups ─────────────────────────────
+
+
+def legacy_flat_path(source: Path, suffix: str) -> Path:
+    """The path an artifact *would* have been at under the pre-2026-05-21
+    flat layout. Used by the probe response to keep old projects discoverable
+    without forcing a migration."""
+    return output_dir() / f"{source.stem}{suffix}"
