@@ -116,6 +116,39 @@ export const api = {
     return () => es.close();
   },
 
+  /**
+   * Upload a video file via multipart. Uses XHR so the browser exposes
+   * upload progress events (fetch's stream API for upload progress is
+   * still patchy). Resolves with the saved path on the server.
+   */
+  upload: (
+    file: File,
+    onProgress?: (frac: number) => void,
+  ): Promise<{ path: string; size_bytes: number }> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const form = new FormData();
+      form.append("file", file);
+      xhr.upload.addEventListener("progress", (e) => {
+        if (onProgress && e.lengthComputable) onProgress(e.loaded / e.total);
+      });
+      xhr.addEventListener("load", () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch (e) {
+            reject(e);
+          }
+        } else {
+          reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+        }
+      });
+      xhr.addEventListener("error", () => reject(new Error("Upload failed")));
+      xhr.addEventListener("abort", () => reject(new Error("Upload aborted")));
+      xhr.open("POST", `${BASE}/upload`);
+      xhr.send(form);
+    }),
+
   // ─── Media URLs (no fetch needed; use directly as src) ─────────────────
   fileUrl: (name: string) => `${BASE}/files/${encodeURIComponent(name)}`,
 

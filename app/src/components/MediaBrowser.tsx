@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useProject } from "../stores/project";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
@@ -9,6 +9,17 @@ function fmtDuration(s: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(0)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+const VIDEO_EXTS = ["mov", "mp4", "mkv", "m4v", "avi", "webm"];
+const isVideoFile = (name: string) =>
+  VIDEO_EXTS.includes(name.split(".").pop()?.toLowerCase() ?? "");
+
 export function MediaBrowser() {
   const media = useProject((s) => s.media);
   const active = useProject((s) => s.activeMediaPath);
@@ -18,13 +29,16 @@ export function MediaBrowser() {
   const setActive = useProject((s) => s.setActive);
 
   const [pathInput, setPathInput] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  // Upload progress per filename so multiple concurrent uploads each track
+  // their own bar. Cleared when the upload completes.
+  const [uploads, setUploads] = useState<Record<string, number>>({});
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const qc = useQueryClient();
 
   const probeMut = useMutation({
     mutationFn: (path: string) => api.probe(path),
     onSuccess: (res, path) => {
-      // Auto-populate pipeline state for any artifacts that already exist
-      // on disk — that way "I analyzed this yesterday" doesn't force a re-run.
       const p = res.paths;
       updateMedia(path, {
         probe: res.source,
@@ -52,37 +66,134 @@ export function MediaBrowser() {
     qc.invalidateQueries({ queryKey: ["media"] });
   };
 
+  const uploadAndAdd = async (file: File) => {
+    if (!isVideoFile(file.name)) {
+      // Soft error — just ignore non-video drops. Could surface a toast later.
+      return;
+    }
+    setUploads((u) => ({ ...u, [file.name]: 0 }));
+    try {
+      const res = await api.upload(file, (frac) => {
+        setUploads((u) => ({ ...u, [file.name]: frac }));
+      });
+      setUploads((u) => {
+        const next = { ...u };
+        delete next[file.name];
+        return next;
+      });
+      addByPath(res.path);
+    } catch (err) {
+      setUploads((u) => {
+        const next = { ...u };
+        delete next[file.name];
+        return next;
+      });
+      // Surface the error to the user via the media list (treat the
+      // intended-path as a failed entry).
+      const fakePath = `/uploads/${file.name}`;
+      addMedia(fakePath);
+      updateMedia(fakePath, {
+        status: "error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const handleFiles = (files: FileList | null) => {
+    if (!files) return;
+    Array.from(files).forEach(uploadAndAdd);
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    handleFiles(e.dataTransfer.files);
+  };
+
   return (
-    <aside className="w-72 shrink-0 border-r border-border bg-bg-panel flex flex-col">
+    <aside
+      className="w-72 shrink-0 border-r border-border bg-bg-panel flex flex-col relative"
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={onDrop}
+    >
       <div className="h-10 shrink-0 border-b border-border flex items-center px-3">
         <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider">
           Media
         </h2>
       </div>
 
-      {/* Path input — for now a text field; Tauri will swap this for a native file dialog */}
-      <form
-        className="p-3 border-b border-border space-y-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          addByPath(pathInput);
-        }}
-      >
+      {/* Add controls — drop zone, file picker, or path input */}
+      <div className="p-3 border-b border-border space-y-2">
+        {/* Hidden file input — triggered by the button below */}
         <input
-          type="text"
-          value={pathInput}
-          onChange={(e) => setPathInput(e.target.value)}
-          placeholder="Paste a video path…"
-          className="w-full h-8 rounded-md border border-border bg-bg px-2 text-sm placeholder:text-text-muted focus:outline-none focus:border-accent"
+          ref={fileInputRef}
+          type="file"
+          accept="video/*,.mov,.mp4,.mkv,.m4v,.avi,.webm"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            handleFiles(e.target.files);
+            e.target.value = ""; // reset so same file can be picked again
+          }}
         />
         <button
-          type="submit"
-          disabled={!pathInput.trim() || probeMut.isPending}
-          className="w-full h-8 rounded-md bg-accent hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium transition-colors"
+          onClick={() => fileInputRef.current?.click()}
+          className="w-full h-9 rounded-md border border-dashed border-border hover:border-accent hover:bg-accent/5 text-sm text-text-secondary hover:text-text-primary transition-colors flex items-center justify-center gap-2"
+          title="…or drop files anywhere on this panel"
         >
-          {probeMut.isPending ? "Probing…" : "Add to project"}
+          <span className="text-base">＋</span>
+          <span>Choose video file…</span>
         </button>
-      </form>
+
+        {/* Path input — for files already on disk */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            addByPath(pathInput);
+          }}
+        >
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              placeholder="…or paste a path"
+              className="flex-1 min-w-0 h-8 rounded-md border border-border bg-bg px-2 text-sm placeholder:text-text-muted focus:outline-none focus:border-accent"
+            />
+            <button
+              type="submit"
+              disabled={!pathInput.trim() || probeMut.isPending}
+              className="shrink-0 h-8 px-3 rounded-md bg-bg-elevated hover:bg-border text-text-secondary text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Add
+            </button>
+          </div>
+        </form>
+
+        {/* Active uploads */}
+        {Object.entries(uploads).map(([name, frac]) => (
+          <div key={name} className="px-1">
+            <div className="flex items-center justify-between text-[10px] mb-1">
+              <span className="truncate text-text-secondary" title={name}>
+                {name}
+              </span>
+              <span className="text-text-muted font-mono shrink-0 ml-2">
+                {Math.round(frac * 100)}%
+              </span>
+            </div>
+            <div className="h-1 bg-bg-elevated rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent transition-all duration-150"
+                style={{ width: `${Math.max(2, frac * 100)}%` }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
 
       {/* Media list */}
       <div className="flex-1 overflow-y-auto">
@@ -90,7 +201,7 @@ export function MediaBrowser() {
           <div className="p-4 text-sm text-text-muted text-center">
             No media yet.
             <br />
-            Paste a path above to get started.
+            Drop a video here or use the buttons above.
           </div>
         ) : (
           <ul className="p-2 space-y-1">
@@ -116,7 +227,10 @@ export function MediaBrowser() {
                       >
                         {name}
                       </div>
-                      <div className="text-xs text-text-muted truncate" title={m.path}>
+                      <div
+                        className="text-xs text-text-muted truncate"
+                        title={m.path}
+                      >
                         {m.path}
                       </div>
                     </div>
@@ -133,11 +247,16 @@ export function MediaBrowser() {
                   </div>
 
                   {m.status === "loading" && (
-                    <div className="mt-1 text-xs text-text-secondary">Probing…</div>
+                    <div className="mt-1 text-xs text-text-secondary">
+                      Probing…
+                    </div>
                   )}
                   {m.status === "error" && (
-                    <div className="mt-1 text-xs text-rose-400" title={m.error}>
-                      Probe failed
+                    <div
+                      className="mt-1 text-xs text-rose-400 truncate"
+                      title={m.error}
+                    >
+                      ✗ {m.error ?? "Failed"}
                     </div>
                   )}
                   {m.status === "ready" && m.probe && (
@@ -159,6 +278,16 @@ export function MediaBrowser() {
           </ul>
         )}
       </div>
+
+      {/* Drag overlay */}
+      {dragOver && (
+        <div className="absolute inset-0 bg-accent/15 border-2 border-dashed border-accent rounded-md pointer-events-none flex items-center justify-center z-20">
+          <div className="text-accent font-medium">Drop to upload</div>
+        </div>
+      )}
     </aside>
   );
 }
+
+// Re-export for compatibility with anyone importing fmtBytes
+export { fmtBytes };

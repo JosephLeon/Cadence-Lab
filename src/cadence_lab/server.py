@@ -61,7 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -558,6 +558,45 @@ def serve_output_file(name: str) -> FileResponse:
     """
     target = _resolve_output_file(name)
     return FileResponse(target)
+
+
+class UploadResponse(BaseModel):
+    path: str
+    size_bytes: int
+
+
+@app.post("/upload", response_model=UploadResponse)
+async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
+    """Stream an uploaded video to the configured output directory.
+
+    Writes to a temp filename first, then renames on success — partial files
+    from a failed/aborted upload don't pollute the output dir. Chunk size
+    chosen to balance copy overhead vs memory footprint for multi-GB files.
+
+    Once Tauri wraps this app, the frontend will use the native file dialog
+    to get a path directly (zero upload). For browser dev mode and any future
+    web deployment, this endpoint is the path through.
+    """
+    if not file.filename:
+        raise HTTPException(400, "upload requires a filename")
+    out = output_dir()
+    final = out / file.filename
+    tmp = out / f".{file.filename}.upload"
+
+    CHUNK = 8 * 1024 * 1024  # 8 MB — empirically fast enough; memory OK
+    try:
+        with tmp.open("wb") as fh:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        tmp.replace(final)  # atomic on POSIX
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    return UploadResponse(path=str(final), size_bytes=final.stat().st_size)
 
 
 @app.get("/source")

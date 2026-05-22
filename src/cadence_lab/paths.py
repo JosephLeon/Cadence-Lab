@@ -31,12 +31,17 @@ def output_dir() -> Path:
     """Return (and create) the directory where pipeline artifacts go.
 
     Reads ``CADENCE_OUTPUT_DIR`` from the environment; falls back to
-    ``./files`` so the tool works without any config on a fresh checkout.
+    ``./files`` (resolved against the current working directory) so the tool
+    works without any config on a fresh checkout.
+
+    Always returns an absolute path — every API response that hands a file
+    location back to the frontend goes through here, and relative paths bite
+    the moment something running in a different cwd needs to open them.
     """
     base_str = os.getenv(_ENV_VAR, "").strip()
     base = Path(base_str).expanduser() if base_str else _DEFAULT_OUTPUT_DIR
     base.mkdir(parents=True, exist_ok=True)
-    return base
+    return base.resolve()
 
 
 # ─── Per-stage path helpers ──────────────────────────────────────────────────
