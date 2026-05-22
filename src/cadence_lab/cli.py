@@ -388,6 +388,33 @@ def render_cmd(
     )
 
 
+@app.command("server")
+def server_cmd(
+    host: Annotated[
+        str, typer.Option(help="Interface to bind to (default: localhost only)."),
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port for the FastAPI sidecar.")] = 8765,
+    reload: Annotated[
+        bool, typer.Option(help="Reload on code change (dev only)."),
+    ] = False,
+) -> None:
+    """Launch the FastAPI pipeline server (used as a Tauri sidecar)."""
+    console.print(
+        f"[bold cyan]Cadence Lab server[/bold cyan] starting on "
+        f"[bold]http://{host}:{port}[/bold]"
+    )
+    console.print(f"[dim]API docs: http://{host}:{port}/docs[/dim]")
+    cmd = [
+        sys.executable, "-m", "uvicorn",
+        "cadence_lab.server:app",
+        "--host", host,
+        "--port", str(port),
+    ]
+    if reload:
+        cmd.append("--reload")
+    subprocess.run(cmd, check=True)
+
+
 @app.command("ui")
 def ui_cmd(
     port: Annotated[int, typer.Option(help="Port for the Streamlit server.")] = 8501,
@@ -395,7 +422,7 @@ def ui_cmd(
         bool, typer.Option(help="Don't auto-open a browser.")
     ] = False,
 ) -> None:
-    """Launch the Streamlit UI (upload → probe → analyze)."""
+    """Launch the Streamlit UI (legacy — being replaced by the Tauri desktop app)."""
     ui_path = Path(__file__).parent / "ui.py"
     cmd = [
         sys.executable, "-m", "streamlit", "run", str(ui_path),

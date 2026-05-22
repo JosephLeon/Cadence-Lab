@@ -22,6 +22,12 @@ files/
 # Streamlit — keep project-wide config.toml, ignore per-user credentials
 .streamlit/credentials.toml
 
+# Frontend (Vite + React)
+app/node_modules/
+app/dist/
+app/.vite/
+app/*.log
+
 # Secrets — load via python-dotenv from .env (template is .env.example)
 .env
 .env.local

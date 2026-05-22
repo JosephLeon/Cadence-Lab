@@ -36,16 +36,19 @@ classifiers = [
 ]
 dependencies = [
     "anthropic>=0.103.1",
+    "fastapi>=0.115",
     "faster-whisper>=1.2.1",
     "ffmpeg-python>=0.2.0",
     "groq>=1.2.0",
     "pydantic>=2.13.4",
     "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.20",
     "rich>=15.0.0",
     "silero-vad>=6.2.1",
     "soundfile>=0.13.1",
     "streamlit>=1.57.0",
     "typer>=0.25.1",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.urls]

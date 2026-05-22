@@ -4,6 +4,11 @@ gatherUsageStats = false
 [server]
 maxUploadSize = 4096
 
+[client]
+# Hide the "Deploy" button and the 3-dot dev menu — this is a local tool, not
+# something users deploy to Streamlit Cloud, and the dev controls are noise.
+toolbarMode = "minimal"
+
 # Dark theme — Tailwind slate-900 base + blue-500 accent.
 # Goal: feels like a real dev tool app (Linear / Vercel / Raycast vibe).
 [theme]

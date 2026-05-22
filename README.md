@@ -129,6 +129,9 @@ git clone https://github.com/JosephLeon/cadence-lab.git
 cd cadence-lab
 uv sync
 cp .env.example .env       # then add your keys
+
+# Frontend (optional today, required once the desktop app ships):
+cd app && bun install && cd ..
 ```
 
 You need two API keys:
@@ -141,6 +144,21 @@ You need two API keys:
   <https://console.anthropic.com/settings/keys>.
 
 ### Launch
+
+**Desktop app (work in progress — Phase 2 in progress):**
+
+```sh
+# Terminal 1 — Python sidecar (FastAPI)
+uv run cadence-lab server
+
+# Terminal 2 — React frontend (Vite dev server)
+cd app && bun dev
+```
+
+Open <http://localhost:1420>. Three-pane editor shell. Eventually wrapped in
+Tauri as a native window — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+**Legacy Streamlit UI** (still works, being phased out):
 
 ```sh
 uv run cadence-lab ui
