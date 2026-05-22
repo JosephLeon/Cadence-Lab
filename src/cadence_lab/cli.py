@@ -491,7 +491,7 @@ def server_cmd(
     host: Annotated[
         str, typer.Option(help="Interface to bind to (default: localhost only)."),
     ] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="Port for the FastAPI sidecar.")] = 8765,
+    port: Annotated[int, typer.Option(help="Port for the FastAPI sidecar.")] = 27182,
     reload: Annotated[
         bool, typer.Option(help="Reload on code change (dev only)."),
     ] = False,

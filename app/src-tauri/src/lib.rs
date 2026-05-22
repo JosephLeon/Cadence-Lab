@@ -39,7 +39,7 @@ fn spawn_sidecar() -> Option<Child> {
   log::info!("spawning sidecar from {}", project_root.display());
 
   let child = Command::new("uv")
-    .args(["run", "cadence-lab", "server", "--port", "8765"])
+    .args(["run", "cadence-lab", "server", "--port", "27182"])
     .current_dir(&project_root)
     .spawn();
 

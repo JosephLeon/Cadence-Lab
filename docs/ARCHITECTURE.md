@@ -18,7 +18,7 @@ project and not relitigate decisions.
 │  │  - state, drag interactions, keyboard shortcuts  │
 │  │  - talks to sidecar via fetch + SSE              │
 │  └────────────┬──────────────────────────────────┘  │
-│               │ HTTP + SSE on localhost:8765       │
+│               │ HTTP + SSE on localhost:27182       │
 │               ▼                                     │
 │  ┌───────────────────────────────────────────────┐  │
 │  │  FastAPI sidecar (src/cadence_lab/server.py)  │  │
@@ -91,7 +91,7 @@ because two ffmpeg encodes at once would thrash a single machine.
 **Launch:**
 
 ```sh
-uv run cadence-lab server         # default: 127.0.0.1:8765
+uv run cadence-lab server         # default: 127.0.0.1:27182
 uv run cadence-lab server --reload  # dev: hot reload on code change
 ```
 
@@ -117,7 +117,7 @@ uv run cadence-lab server --reload  # dev: hot reload on code change
 Jobs live in an in-memory dict (`_jobs`) keyed by UUID. Acceptable for a
 desktop single-user app; would need Redis/DB for multi-user SaaS.
 
-**API docs:** auto-generated at `http://localhost:8765/docs` (Swagger UI) and
+**API docs:** auto-generated at `http://localhost:27182/docs` (Swagger UI) and
 `/redoc`. Hit those during development to explore the schema interactively.
 
 ## Frontend (to be built — Phase 2)

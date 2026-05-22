@@ -20,7 +20,7 @@ HTTP + Server-Sent Events.
 │               ▼                         │
 │  ┌───────────────────────────────────┐  │
 │  │  FastAPI sidecar (this file)      │  │
-│  │  - localhost:8765                 │  │
+│  │  - localhost:27182                │  │
 │  │  - routes → existing pipeline     │  │
 │  └───────────────────────────────────┘  │
 └─────────────────────────────────────────┘
