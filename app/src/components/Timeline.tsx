@@ -34,8 +34,24 @@ export function Timeline() {
     enabled: !!planPath,
   });
 
-  // Push keep-segment boundaries to the module-level cache so the keyboard
-  // shortcut hook can do "jump to next/prev cut" without prop-drilling.
+  // Generate (and cache server-side) a sprite sheet of evenly-spaced frames
+  // for the video row. Keyed on path — re-fetched only if you switch clips.
+  const thumbsQuery = useQuery({
+    queryKey: ["thumbnails", item?.path],
+    queryFn: () => api.getThumbnails(item!.path, 60, 60),
+    enabled: !!item?.path,
+    staleTime: Infinity,  // sprites don't change for a given source
+  });
+
+  // Downsampled audio peaks for the waveform on the audio row.
+  // We point at the source video; backend auto-extracts mic WAV if needed.
+  const peaksQuery = useQuery({
+    queryKey: ["audio-peaks", item?.path],
+    queryFn: () => api.getAudioPeaks(item!.path, 2000),
+    enabled: !!item?.path,
+    staleTime: Infinity,
+  });
+
   useEffect(() => {
     if (!planQuery.data) {
       planCache.set([]);
@@ -77,16 +93,49 @@ export function Timeline() {
       </div>
 
       <div className="flex-1 grid grid-rows-3 gap-1 p-2">
+        {/* Video row — frame strip across the duration */}
         <TrackBase
           name="Video"
           duration={duration}
           currentTime={playback.currentTime}
-        />
+        >
+          {thumbsQuery.data ? (
+            <div
+              className="absolute inset-0"
+              style={{
+                backgroundImage: `url("/api${thumbsQuery.data.url}")`,
+                backgroundSize: "100% 100%",
+                backgroundRepeat: "no-repeat",
+                opacity: 0.95,
+              }}
+            />
+          ) : thumbsQuery.isLoading ? (
+            <div className="absolute inset-0 flex items-center justify-center text-[10px] text-text-muted bg-bg-elevated/30 animate-pulse">
+              Generating thumbnails…
+            </div>
+          ) : null}
+        </TrackBase>
+
+        {/* Audio row — waveform rendered from peaks JSON */}
         <TrackBase
           name="Audio"
           duration={duration}
           currentTime={playback.currentTime}
-        />
+        >
+          {peaksQuery.data ? (
+            <Waveform
+              peaks={peaksQuery.data.peaks}
+              currentTime={playback.currentTime}
+              duration={duration}
+            />
+          ) : peaksQuery.isLoading ? (
+            <div className="absolute inset-0 flex items-center justify-center text-[10px] text-text-muted bg-bg-elevated/30 animate-pulse">
+              Computing waveform…
+            </div>
+          ) : null}
+        </TrackBase>
+
+        {/* AI cuts row — keeps/cuts overlay + tooltips */}
         <CutsTrack
           name="AI cuts"
           duration={duration}
@@ -141,6 +190,58 @@ function TrackBase({ name, duration, currentTime, children }: TrackProps) {
   );
 }
 
+interface WaveformProps {
+  peaks: number[];
+  currentTime: number;
+  duration: number;
+}
+
+/**
+ * Lightweight SVG waveform. Each peak becomes a vertical bar reflected
+ * about the centerline. We size the SVG by viewBox so it scales fluidly
+ * with the track width without re-rendering on resize.
+ *
+ * For a 2000-peak track at ~1500px wide this is well under 1ms to render —
+ * not enough to justify Wavesurfer's overhead.
+ */
+function Waveform({ peaks, currentTime, duration }: WaveformProps) {
+  const playedPct = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const bars = useMemo(() => {
+    const h = 100;
+    const centerY = h / 2;
+    return peaks.map((p, i) => {
+      const height = Math.max(p * h, 1);
+      return (
+        <rect
+          key={i}
+          x={i}
+          y={centerY - height / 2}
+          width={1}
+          height={height}
+        />
+      );
+    });
+  }, [peaks]);
+
+  return (
+    <svg
+      viewBox={`0 0 ${peaks.length} 100`}
+      preserveAspectRatio="none"
+      className="absolute inset-0 w-full h-full"
+    >
+      <defs>
+        <clipPath id="played-clip">
+          <rect x="0" y="0" width={(playedPct / 100) * peaks.length} height="100" />
+        </clipPath>
+      </defs>
+      {/* Unplayed waveform (lower-contrast) */}
+      <g fill="#60A5FA" fillOpacity="0.45">{bars}</g>
+      {/* Played overlay (brighter accent) */}
+      <g fill="#3B82F6" clipPath="url(#played-clip)">{bars}</g>
+    </svg>
+  );
+}
+
 interface CutsTrackProps extends TrackProps {
   keeps: { source_start: number; source_end: number }[];
   cuts: CutMarker[];
@@ -183,9 +284,6 @@ function CutsTrack({
           style={{ left: `${s.left}%`, width: `${s.width}%` }}
         />
       ))}
-      {/* Cut markers with hover tooltips. Stop click propagation so clicking
-          a marker still seeks rather than just triggering the track-level
-          handler at a slightly different x. */}
       {cutMarkers.map((c) => (
         <div
           key={c.key}
@@ -196,11 +294,9 @@ function CutsTrack({
             videoRef.seek(c.start);
           }}
         >
-          {/* Hit area / hover highlight */}
           <div className="absolute inset-0 hover:bg-rose-400/30 transition-colors" />
           <div className="absolute inset-y-0 left-0 w-px bg-rose-400/60" />
           <div className="absolute inset-y-0 right-0 w-px bg-rose-400/60" />
-          {/* Tooltip — appears above the timeline on hover */}
           <div
             className="
               absolute bottom-full left-1/2 -translate-x-1/2 mb-1

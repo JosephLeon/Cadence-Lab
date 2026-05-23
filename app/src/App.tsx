@@ -44,6 +44,15 @@ export default function App() {
     };
   }, []);
 
+  // Layout:
+  //   ┌────────────────────────────────────┐
+  //   │ TopBar (full width)                │
+  //   ├──────┬─────────────────────┬───────┤
+  //   │ Med  │ Canvas / Review     │ Right │   <- 3-column row
+  //   │ ia   │                     │ panel │      grows to fill
+  //   ├──────┴─────────────────────┴───────┤
+  //   │ Timeline (full width, fixed bottom)│
+  //   └────────────────────────────────────┘
   return (
     <div className="h-full w-full flex flex-col">
       <TopBar serverOk={serverOk} />
@@ -53,14 +62,12 @@ export default function App() {
           {reviewOpen ? (
             <ReviewPanel onClose={() => setReviewOpen(false)} />
           ) : (
-            <>
-              <Canvas />
-              <Timeline />
-            </>
+            <Canvas />
           )}
         </main>
         <RightPanel onOpenReview={() => setReviewOpen(true)} />
       </div>
+      <Timeline />
     </div>
   );
 }

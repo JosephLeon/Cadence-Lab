@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -80,6 +81,7 @@ from .paths import (
     analysis_path,
     classified_path,
     legacy_flat_path,
+    mic_wav_path,
     output_dir,
     plan_path,
     project_dir,
@@ -200,10 +202,12 @@ class CanonicalPaths(BaseModel):
     classified: str
     plan: str
     rendered: str
+    mic_wav: str
     analysis_exists: bool
     classified_exists: bool
     plan_exists: bool
     rendered_exists: bool
+    mic_wav_exists: bool
 
 
 class ProbeResponse(BaseModel):
@@ -219,6 +223,7 @@ def _canonical_paths(source: Path) -> CanonicalPaths:
     cp = classified_path(source)
     pp = plan_path(source)
     rp = rendered_path(source)
+    mp = mic_wav_path(source)
 
     # Legacy fallback: if a file exists in the old flat location but not in
     # the per-source subdir, surface the old path so existing projects keep
@@ -239,16 +244,22 @@ def _canonical_paths(source: Path) -> CanonicalPaths:
         lf = legacy_flat_path(source, ".edited.mp4")
         if lf.exists():
             rp = lf
+    if not mp.exists():
+        lf = legacy_flat_path(source, ".mic.16k.wav")
+        if lf.exists():
+            mp = lf
 
     return CanonicalPaths(
         analysis=str(ap),
         classified=str(cp),
         plan=str(pp),
         rendered=str(rp),
+        mic_wav=str(mp),
         analysis_exists=ap.exists(),
         classified_exists=cp.exists(),
         plan_exists=pp.exists(),
         rendered_exists=rp.exists(),
+        mic_wav_exists=mp.exists(),
     )
 
 
@@ -662,6 +673,169 @@ def serve_source(path: str = Query(..., description="Absolute path to source vid
     if not src.is_file():
         raise HTTPException(400, "not a file")
     return FileResponse(src)
+
+
+_AUDIO_EXTS = {".wav", ".flac", ".aiff", ".aif", ".mp3", ".ogg"}
+_PEAKS_LOCK = threading.Lock()
+
+
+def _ensure_decodable_audio(input_path: Path) -> Path:
+    """If the input is already an audio file, return it as-is. If it's a
+    video, extract the audio to the canonical mic-WAV location (16 kHz mono
+    PCM) and cache it there so subsequent requests are instant and the
+    probe endpoint surfaces it as ``mic_wav_exists``.
+    """
+    ext = input_path.suffix.lower()
+    if ext in _AUDIO_EXTS:
+        return input_path
+    # It's a video. Cache the extracted WAV at the canonical mic-wav path so
+    # this stays consistent with what ingest would have produced anyway.
+    out = mic_wav_path(input_path)
+    with _PEAKS_LOCK:
+        if not out.exists():
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-i", str(input_path),
+                    "-vn",
+                    "-ac", "1",
+                    "-ar", "16000",
+                    "-c:a", "pcm_s16le",
+                    str(out),
+                ],
+                check=True, capture_output=True,
+            )
+    return out
+
+
+@app.get("/audio-peaks")
+def audio_peaks(
+    audio_path: str = Query(..., description="Absolute path to source audio OR video"),
+    bins: int = Query(2000, ge=100, le=10000, description="Number of downsampled peaks to return"),
+) -> dict:
+    """Return downsampled amplitude peaks for waveform rendering.
+
+    Wavesurfer.js can render a waveform from a precomputed peaks array
+    instead of downloading and decoding the audio itself — huge win for long
+    files (a 36-min mic WAV is ~70 MB, vs. ~16 KB of peaks JSON).
+
+    If the input is a video file, audio is auto-extracted to the canonical
+    mic-WAV location first and cached. So this endpoint works against any
+    media file the user has loaded, regardless of whether they've run the
+    full analyze pipeline yet.
+
+    Algorithm: load the audio into a numpy array, split into ``bins`` equal
+    chunks, take the max absolute amplitude of each chunk. Returns floats in [0, 1].
+    """
+    import numpy as np
+    import soundfile as sf
+
+    raw_input = Path(audio_path).expanduser()
+    if not raw_input.exists():
+        raise HTTPException(404, f"input not found: {raw_input}")
+    try:
+        src = _ensure_decodable_audio(raw_input)
+        samples, sample_rate = sf.read(str(src), dtype="float32", always_2d=False)
+    except Exception as e:
+        raise HTTPException(500, f"could not decode audio: {e}") from e
+
+    if samples.ndim > 1:  # collapse to mono if multi-channel
+        samples = samples.mean(axis=1)
+
+    if len(samples) == 0:
+        return {"peaks": [], "duration": 0.0, "sample_rate": int(sample_rate), "bins": bins}
+
+    # Downsample to `bins` peaks. We use numpy's array_split (handles
+    # non-evenly-divisible lengths) plus np.abs().max() per chunk.
+    chunks = np.array_split(samples, bins)
+    peaks = [float(np.abs(c).max()) if len(c) > 0 else 0.0 for c in chunks]
+    duration = len(samples) / float(sample_rate)
+    return {
+        "peaks": peaks,
+        "duration": duration,
+        "sample_rate": int(sample_rate),
+        "bins": len(peaks),
+    }
+
+
+_THUMB_LOCK = threading.Lock()
+
+
+@app.get("/thumbnails")
+def thumbnails(
+    source_path: str = Query(..., description="Absolute path to source video"),
+    count: int = Query(60, ge=8, le=200, description="Number of frames in the sprite"),
+    height: int = Query(60, ge=24, le=200, description="Thumbnail height in pixels (width scales by aspect)"),
+) -> dict:
+    """Generate (and cache) a horizontal sprite sheet of evenly-spaced frames.
+
+    Strategy:
+    - One sprite PNG per source, cached in the project's output dir under
+      ``<stem>.thumbs.<count>x<height>.png`` so re-fetches are free.
+    - ffmpeg ``select`` + ``scale`` + ``tile`` filter chain extracts N
+      frames at equal time intervals and arranges them in a 1-row strip.
+    - Returns the served URL + dimensions so the frontend can lay the strip
+      across the timeline as a CSS background.
+    """
+    src = Path(source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+
+    proj = project_dir(src)
+    sprite = proj / f"{src.stem}.thumbs.{count}x{height}.png"
+    width_meta = proj / f"{src.stem}.thumbs.{count}x{height}.json"
+
+    with _THUMB_LOCK:
+        if not sprite.exists() or not width_meta.exists():
+            # We need the video duration to compute the frame interval.
+            probe_data = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-print_format", "json",
+                    "-show_entries", "format=duration:stream=width,height,r_frame_rate",
+                    "-select_streams", "v:0",
+                    str(src),
+                ],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            meta = json.loads(probe_data)
+            duration = float(meta["format"]["duration"])
+            src_w = int(meta["streams"][0]["width"])
+            src_h = int(meta["streams"][0]["height"])
+            thumb_w = int(round(height * src_w / src_h))
+
+            # `fps=1/N` extracts a frame every N seconds. We pick N so we get
+            # exactly `count` frames (then `tile` arranges them horizontally).
+            interval = max(duration / count, 0.001)
+
+            tmp = sprite.with_suffix(".tmp.png")
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-i", str(src),
+                    "-vf", f"fps=1/{interval:.6f},scale={thumb_w}:{height},tile={count}x1",
+                    "-frames:v", "1",
+                    "-update", "1",
+                    str(tmp),
+                ],
+                check=True, capture_output=True,
+            )
+            tmp.replace(sprite)
+            width_meta.write_text(json.dumps({
+                "count": count,
+                "thumb_width": thumb_w,
+                "thumb_height": height,
+                "sprite_width": thumb_w * count,
+                "sprite_height": height,
+                "source_duration": duration,
+            }))
+
+    meta = json.loads(width_meta.read_text())
+    # Serve via /files using the relative path under output_dir.
+    rel = sprite.relative_to(output_dir())
+    return {
+        "url": f"/files/{rel.as_posix()}",
+        **meta,
+    }
 
 
 @app.get("/audio-clip")

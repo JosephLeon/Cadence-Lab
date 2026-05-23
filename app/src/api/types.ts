@@ -30,10 +30,29 @@ export interface CanonicalPaths {
   classified: string;
   plan: string;
   rendered: string;
+  mic_wav: string;
   analysis_exists: boolean;
   classified_exists: boolean;
   plan_exists: boolean;
   rendered_exists: boolean;
+  mic_wav_exists: boolean;
+}
+
+export interface AudioPeaks {
+  peaks: number[];
+  duration: number;
+  sample_rate: number;
+  bins: number;
+}
+
+export interface ThumbnailSprite {
+  url: string;
+  count: number;
+  thumb_width: number;
+  thumb_height: number;
+  sprite_width: number;
+  sprite_height: number;
+  source_duration: number;
 }
 
 export interface ProbeResponse {

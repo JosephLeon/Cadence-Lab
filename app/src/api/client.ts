@@ -2,11 +2,13 @@
 // Uses /api as the base — Vite's dev server proxies it to the Python server.
 
 import type {
+  AudioPeaks,
   JobEvent,
   JobHandle,
   JobStatusResponse,
   PlanResponse,
   ProbeResponse,
+  ThumbnailSprite,
 } from "./types";
 
 const BASE = "/api";
@@ -160,6 +162,18 @@ export const api = {
   audioClipUrl: (audio_path: string, start: number, end: number, pad = 1.5) =>
     `${BASE}/audio-clip?audio_path=${encodeURIComponent(audio_path)}` +
     `&start=${start}&end=${end}&pad=${pad}`,
+
+  // ─── Visualization data (timeline) ─────────────────────────────────────
+  getAudioPeaks: (audio_path: string, bins = 2000) =>
+    jsonFetch<AudioPeaks>(
+      `/audio-peaks?audio_path=${encodeURIComponent(audio_path)}&bins=${bins}`,
+    ),
+
+  getThumbnails: (source_path: string, count = 60, height = 60) =>
+    jsonFetch<ThumbnailSprite>(
+      `/thumbnails?source_path=${encodeURIComponent(source_path)}` +
+        `&count=${count}&height=${height}`,
+    ),
 
   // ─── Bundle loads ──────────────────────────────────────────────────────
   getClassification: (path: string) =>
