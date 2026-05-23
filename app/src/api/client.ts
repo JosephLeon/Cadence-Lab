@@ -89,6 +89,11 @@ export const api = {
     audio_track?: number;
     encoder?: "auto" | "h264_videotoolbox" | "libx264";
     audio_bitrate?: string;
+    audio?: {
+      enhance_speech: "off" | "low" | "medium" | "high";
+      auto_duck: boolean;
+      ducking_db: number;
+    };
   }) =>
     jsonFetch<JobHandle>("/render", {
       method: "POST",

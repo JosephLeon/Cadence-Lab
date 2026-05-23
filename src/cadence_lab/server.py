@@ -443,12 +443,25 @@ def classify_endpoint(req: ClassifyRequest) -> JobHandle:
     return JobHandle(job_id=job.id)
 
 
+SpeechEnhanceLevel = Literal["off", "low", "medium", "high"]
+
+
+class AudioSettings(BaseModel):
+    """AI audio enhancement settings applied at render time. Lives inside
+    RenderRequest. All optional — defaults to no enhancement."""
+
+    enhance_speech: SpeechEnhanceLevel = "off"
+    auto_duck: bool = False
+    ducking_db: int = -8  # negative: lowers other tracks by this much
+
+
 class RenderRequest(BaseModel):
     analysis_path: str
     plan_path: str | None = None  # default: derive from output_dir
     audio_track: int | None = None
     encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
     audio_bitrate: str = "192k"
+    audio: AudioSettings | None = None
 
 
 @app.post("/render", response_model=JobHandle)
@@ -476,7 +489,13 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
         if req.audio_track is not None
         else bundle.ingest.mic_track_index
     )
-    out = rendered_path(src)
+    out = rendered_path(
+        src,
+        enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
+        auto_duck=(req.audio.auto_duck if req.audio else False),
+        ducking_db=(req.audio.ducking_db if req.audio else -8),
+        source_audio_track_count=len(bundle.ingest.source.audio_tracks),
+    )
 
     job = _new_job("render")
 
@@ -491,6 +510,10 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 audio_track_index=track,
                 encoder=req.encoder,
                 audio_bitrate=req.audio_bitrate,
+                enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
+                auto_duck=(req.audio.auto_duck if req.audio else False),
+                ducking_db=(req.audio.ducking_db if req.audio else -8),
+                source_audio_track_count=len(bundle.ingest.source.audio_tracks),
                 progress=cb,
             )
             job.finish(

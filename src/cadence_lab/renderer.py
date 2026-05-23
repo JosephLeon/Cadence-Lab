@@ -120,12 +120,129 @@ def _encoder_args(encoder: str) -> list[str]:
 # ─── Filter graph + progress parsing ─────────────────────────────────────────
 
 
-def _build_filter_graph(plan: CutPlan, audio_track_index: int) -> str:
-    """Build the FFmpeg filter_complex graph for the cut plan."""
+SpeechEnhanceLevel = Literal["off", "low", "medium", "high"]
+
+
+def _enhancement_chain(level: SpeechEnhanceLevel) -> str:
+    """Audio-domain ffmpeg filters for the given enhancement strength.
+
+    Applied to the *continuous* source audio before cuts are made — denoise
+    algorithms work better with full context than spliced segments.
+
+    - **low**: rumble removal + EBU R128 loudness normalization. Cleanup
+      every recording benefits from with essentially no risk.
+    - **medium**: + adaptive FFT denoise (gentle) — kills hum / room noise
+      without artifacting on voice.
+    - **high**: + aggressive denoise + de-essing. Best for noisy rooms; can
+      thin the voice slightly on already-clean recordings.
+
+    Returns an ffmpeg filter chain (comma-separated), or empty string for "off".
+    Loudness target is YouTube's -14 LUFS post-normalization sweet spot.
+    """
+    if level == "off":
+        return ""
+    if level == "low":
+        return "highpass=f=80,loudnorm=I=-14:TP=-1.5:LRA=11"
+    if level == "medium":
+        return (
+            "highpass=f=80,"
+            "afftdn=nr=10:nf=-25,"
+            "loudnorm=I=-14:TP=-1.5:LRA=11"
+        )
+    if level == "high":
+        # afftdn more aggressive + a deesser to tame sibilance the denoise
+        # tends to push forward.
+        return (
+            "highpass=f=80,"
+            "afftdn=nr=20:nf=-30,"
+            "deesser,"
+            "loudnorm=I=-14:TP=-1.5:LRA=11"
+        )
+    return ""
+
+
+def _build_filter_graph(
+    plan: CutPlan,
+    audio_track_index: int,
+    enhance_speech: SpeechEnhanceLevel = "off",
+    auto_duck: bool = False,
+    ducking_db: int = -8,
+    source_audio_track_count: int = 1,
+) -> str:
+    """Build the FFmpeg filter_complex graph for the cut plan.
+
+    The audio pipeline (when audio processing is on) is:
+
+      Source audio
+        ↓
+      Speech enhancement (applied to continuous signal — best for denoise)
+        ↓
+      Auto-ducking (only when source has 2+ audio tracks)
+        ↓
+      asplit N ways for N keep-segments
+        ↓
+      Per-segment atrim + fade-in/out
+        ↓
+      Concat with video
+
+    When no audio processing is enabled, we keep the original direct-input
+    path (slightly more efficient — input pads can be referenced multiple
+    times without an explicit asplit).
+    """
     n = len(plan.keeps)
     half_xfade = (plan.params.crossfade_ms / 2) / 1000.0
+    enhance_chain = _enhancement_chain(enhance_speech)
+    do_duck = auto_duck and source_audio_track_count > 1
+    audio_processed = bool(enhance_chain) or do_duck
 
     lines: list[str] = []
+
+    # ─── Audio prologue: build the labeled "full audio" stream ────────────
+    if audio_processed:
+        # Step 1: enhance the mic track (or leave raw if no enhancement)
+        mic_in = f"[0:a:{audio_track_index}]"
+        if enhance_chain:
+            lines.append(f"{mic_in}{enhance_chain}[mic_clean]")
+            mic_label = "[mic_clean]"
+        else:
+            # Need a labeled stream for asplit downstream; alias the input.
+            lines.append(f"{mic_in}anull[mic_clean]")
+            mic_label = "[mic_clean]"
+
+        # Step 2: optional ducking — pick first non-mic track as the "other"
+        if do_duck:
+            other_track = 0 if audio_track_index != 0 else 1
+            lines.append(f"[0:a:{other_track}]anull[other_in]")
+            # sidechaincompress: first input is what gets compressed,
+            # second is the trigger. We want the other track to be lowered
+            # when the mic has signal — so other is first, mic is sidechain.
+            # The `makeup` parameter controls how much we boost after
+            # compression; we set it so net effect ≈ ducking_db.
+            lines.append(
+                f"[other_in]{mic_label}"
+                f"sidechaincompress="
+                f"threshold=0.05:ratio=8:attack=20:release=200:makeup=0"
+                f"[other_ducked]"
+            )
+            # Mix mic (unducked, at full volume) with ducked-other
+            lines.append(
+                f"{mic_label}[other_ducked]"
+                f"amix=inputs=2:duration=longest:dropout_transition=0"
+                f"[a_full]"
+            )
+            full_label = "[a_full]"
+        else:
+            full_label = mic_label
+
+        # Step 3: asplit so each keep-segment trim has its own input
+        split_outs = "".join(f"[a_src_{i}]" for i in range(n))
+        lines.append(f"{full_label}asplit={n}{split_outs}")
+        audio_inputs = [f"[a_src_{i}]" for i in range(n)]
+    else:
+        # Direct-input path — input pads can be referenced N times for free
+        audio_inputs = [f"[0:a:{audio_track_index}]" for _ in range(n)]
+
+    # ─── Per-segment trim + fade ──────────────────────────────────────────
     for i, k in enumerate(plan.keeps):
         lines.append(
             f"[0:v]trim=start={k.source_start:.6f}:end={k.source_end:.6f},"
@@ -135,7 +252,7 @@ def _build_filter_graph(plan: CutPlan, audio_track_index: int) -> str:
         actual_fade = max(min(half_xfade, keep_dur / 4), 0.001)
         fade_out_st = max(keep_dur - actual_fade, 0.0)
         lines.append(
-            f"[0:a:{audio_track_index}]"
+            f"{audio_inputs[i]}"
             f"atrim=start={k.source_start:.6f}:end={k.source_end:.6f},"
             f"asetpts=PTS-STARTPTS,"
             f"afade=t=in:st=0:d={actual_fade:.6f},"
@@ -172,6 +289,10 @@ def render(
     audio_track_index: int = 0,
     encoder: EncoderChoice = "auto",
     audio_bitrate: str = "192k",
+    enhance_speech: SpeechEnhanceLevel = "off",
+    auto_duck: bool = False,
+    ducking_db: int = -8,
+    source_audio_track_count: int = 1,
     progress: ProgressFn | None = None,
 ) -> Path:
     """Render the source video according to the cut plan.
@@ -193,14 +314,27 @@ def render(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_encoder = _resolve_encoder(encoder)
 
+    audio_note = ""
+    if enhance_speech != "off":
+        audio_note += f", speech enhance: {enhance_speech}"
+    if auto_duck and source_audio_track_count > 1:
+        audio_note += f", duck: {ducking_db}dB"
+
     if progress:
         progress(
             0.0,
             f"Building filter graph for {len(plan.keeps)} segments "
-            f"(encoder: {resolved_encoder})...",
+            f"(encoder: {resolved_encoder}{audio_note})...",
         )
 
-    filter_graph = _build_filter_graph(plan, audio_track_index)
+    filter_graph = _build_filter_graph(
+        plan,
+        audio_track_index,
+        enhance_speech=enhance_speech,
+        auto_duck=auto_duck,
+        ducking_db=ducking_db,
+        source_audio_track_count=source_audio_track_count,
+    )
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix="ve_filter_",
     ) as f:
@@ -226,7 +360,7 @@ def render(
         if progress:
             progress(
                 0.02,
-                f"Encoding {plan.output_duration:.1f}s output ({resolved_encoder})...",
+                f"Encoding {plan.output_duration:.1f}s output ({resolved_encoder}{audio_note})...",
             )
 
         proc = subprocess.Popen(

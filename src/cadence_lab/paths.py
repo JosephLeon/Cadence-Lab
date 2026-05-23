@@ -82,8 +82,32 @@ def plan_path(source: Path) -> Path:
     return project_dir(source) / f"{source.stem}.plan.json"
 
 
-def rendered_path(source: Path) -> Path:
-    return project_dir(source) / f"{source.stem}.edited.mp4"
+def rendered_path(
+    source: Path,
+    enhance_speech: str = "off",
+    auto_duck: bool = False,
+    ducking_db: int = -8,
+    source_audio_track_count: int = 1,
+) -> Path:
+    """Output path for a rendered MP4.
+
+    Audio settings are encoded into the filename so different combinations
+    coexist on disk and can be A/B compared. Examples:
+
+        recording.edited.mp4                            # pacing only
+        recording.edited.enhance-medium.mp4             # + speech enhance
+        recording.edited.enhance-high.duck-8.mp4        # + ducking
+
+    Ducking only contributes to the filename when it would actually run
+    (source has 2+ audio tracks) — otherwise it's a no-op and shouldn't
+    affect the output name.
+    """
+    parts = [source.stem, "edited"]
+    if enhance_speech != "off":
+        parts.append(f"enhance-{enhance_speech}")
+    if auto_duck and source_audio_track_count > 1:
+        parts.append(f"duck{ducking_db}")
+    return project_dir(source) / (".".join(parts) + ".mp4")
 
 
 def mic_wav_path(source: Path) -> Path:

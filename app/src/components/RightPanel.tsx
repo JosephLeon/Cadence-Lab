@@ -316,12 +316,6 @@ function AudioTab({ item, onChange }: AudioTabProps) {
           </div>
         )}
       </Section>
-
-      <div className="text-[10px] text-text-muted px-1 italic">
-        ⚠ UI only for now — backend implementation (ffmpeg filter chain +
-        sidechain compression) lands in a follow-on phase. Toggles save your
-        intent but don't yet affect the render output.
-      </div>
     </>
   );
 }

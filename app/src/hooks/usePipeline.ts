@@ -143,6 +143,11 @@ export function usePipeline(mediaPath: string | null) {
           const handle = await api.render({
             analysis_path: media.pipeline.analysisPath,
             plan_path: media.pipeline.planPath,
+            audio: {
+              enhance_speech: media.audio.enhance_speech,
+              auto_duck: media.audio.auto_duck,
+              ducking_db: media.audio.ducking_db,
+            },
           });
           updateMedia(mediaPath, {
             job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
