@@ -20,7 +20,10 @@ interface CutMarker {
   reason: string;
 }
 
-const ZOOM_STEP = 1.25;
+// Two different step sizes: small for wheel/trackpad (lots of events per
+// gesture) and larger for buttons/keyboard (one event per intent).
+const ZOOM_WHEEL_STEP = 1.1;
+const ZOOM_BUTTON_STEP = 1.25;
 
 export function Timeline() {
   const media = useProject((s) => s.media);
@@ -94,7 +97,7 @@ export function Timeline() {
       const contentXBefore = mouseXInViewport + el.scrollLeft;
 
       // Negative deltaY = wheel up = zoom in (matches macOS pinch convention)
-      const factor = e.deltaY > 0 ? 1 / ZOOM_STEP : ZOOM_STEP;
+      const factor = e.deltaY > 0 ? 1 / ZOOM_WHEEL_STEP : ZOOM_WHEEL_STEP;
       setZoom((prev) => {
         const next = Math.max(1, Math.min(50, prev * factor));
         // Adjust scrollLeft after the zoom so the same content point stays
@@ -150,10 +153,10 @@ export function Timeline() {
         fit();
       } else if (e.key === "=" || e.key === "+") {
         e.preventDefault();
-        setZoom((z) => z * ZOOM_STEP);
+        setZoom((z) => z * ZOOM_BUTTON_STEP);
       } else if (e.key === "-" || e.key === "_") {
         e.preventDefault();
-        setZoom((z) => z / ZOOM_STEP);
+        setZoom((z) => z / ZOOM_BUTTON_STEP);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -202,7 +205,7 @@ export function Timeline() {
         {/* Zoom controls */}
         <div className="flex items-center gap-1 text-[10px]">
           <button
-            onClick={() => setZoom((z) => z / ZOOM_STEP)}
+            onClick={() => setZoom((z) => z / ZOOM_BUTTON_STEP)}
             disabled={zoom <= 1}
             className="h-5 w-5 rounded text-text-muted hover:text-text-primary hover:bg-bg-elevated disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Zoom out (⌘−)"
@@ -217,7 +220,7 @@ export function Timeline() {
             {zoom < 1.05 ? "Fit" : `${zoom.toFixed(1)}×`}
           </button>
           <button
-            onClick={() => setZoom((z) => z * ZOOM_STEP)}
+            onClick={() => setZoom((z) => z * ZOOM_BUTTON_STEP)}
             disabled={zoom >= 50}
             className="h-5 w-5 rounded text-text-muted hover:text-text-primary hover:bg-bg-elevated disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Zoom in (⌘=)"

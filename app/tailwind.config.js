@@ -18,10 +18,13 @@ export default {
           DEFAULT: "#3B82F6",
           hover: "#2563EB",
         },
+        // Each level bumped one step brighter than before for stronger
+        // contrast on the dark background. Was slate-200/400/500;
+        // now slate-100/300/400.
         text: {
-          primary: "#E2E8F0",
-          secondary: "#94A3B8",
-          muted: "#64748B",
+          primary: "#F1F5F9",
+          secondary: "#CBD5E1",
+          muted: "#94A3B8",
         },
       },
       fontFamily: {
