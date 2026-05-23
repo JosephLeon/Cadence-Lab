@@ -6,7 +6,11 @@ export function TopBar({ serverOk }: Props) {
   return (
     <header className="h-12 shrink-0 border-b border-border flex items-center px-4 gap-3 bg-bg-panel">
       <div className="flex items-center gap-2">
-        <span className="text-lg">🎬</span>
+        <img
+          src="/icon.png"
+          alt=""
+          className="h-6 w-6 rounded-md shadow-sm"
+        />
         <h1 className="font-semibold tracking-tight">Cadence Lab</h1>
       </div>
 
