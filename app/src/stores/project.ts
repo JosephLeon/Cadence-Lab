@@ -35,6 +35,26 @@ export interface JobState {
   error?: string;
 }
 
+/**
+ * AI Audio enhancement settings. Currently UI-only: backend wiring (ffmpeg
+ * filter graph + ducking sidechain) is a follow-on phase. Settings live on
+ * the media item so toggling them doesn't blow away when the user switches
+ * clips and back.
+ */
+export type SpeechEnhanceLevel = "off" | "low" | "medium" | "high";
+
+export interface AudioSettings {
+  enhance_speech: SpeechEnhanceLevel;
+  auto_duck: boolean;
+  ducking_db: number;  // negative; e.g. -8 lowers other tracks by 8 dB
+}
+
+export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
+  enhance_speech: "off",
+  auto_duck: false,
+  ducking_db: -8,
+};
+
 export interface MediaItem {
   /** Absolute path on the user's filesystem */
   path: string;
@@ -51,6 +71,8 @@ export interface MediaItem {
   job: JobState | null;
   /** Pending review overrides (cleared after Apply or Reset) */
   overrides: OverrideMap;
+  /** AI audio enhancement settings applied at render time */
+  audio: AudioSettings;
 }
 
 /** Playback state for the active video. */
@@ -72,6 +94,7 @@ interface ProjectState {
   setPlayback: (patch: Partial<PlaybackState>) => void;
   setOverride: (mediaPath: string, key: string, value: string | null) => void;
   clearOverrides: (mediaPath: string) => void;
+  setAudio: (mediaPath: string, patch: Partial<AudioSettings>) => void;
 }
 
 export const useProject = create<ProjectState>((set) => ({
@@ -95,6 +118,7 @@ export const useProject = create<ProjectState>((set) => ({
             pipeline: {},
             job: null,
             overrides: {},
+            audio: { ...DEFAULT_AUDIO_SETTINGS },
           },
         ],
         activeMediaPath: s.activeMediaPath ?? path,
@@ -140,6 +164,13 @@ export const useProject = create<ProjectState>((set) => ({
     set((s) => ({
       media: s.media.map((m) =>
         m.path === mediaPath ? { ...m, overrides: {} } : m,
+      ),
+    })),
+
+  setAudio: (mediaPath, patch) =>
+    set((s) => ({
+      media: s.media.map((m) =>
+        m.path === mediaPath ? { ...m, audio: { ...m.audio, ...patch } } : m,
       ),
     })),
 }));
