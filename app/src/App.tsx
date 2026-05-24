@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
-import { TopBar } from "./components/TopBar";
+import { TopBar, type AppView } from "./components/TopBar";
 import { MediaBrowser } from "./components/MediaBrowser";
 import { Canvas } from "./components/Canvas";
 import { RightPanel } from "./components/RightPanel";
 import { Timeline } from "./components/Timeline";
 import { ReviewPanel } from "./components/ReviewPanel";
+import { SplicingView } from "./components/SplicingView";
 import { api } from "./api/client";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [view, setView] = useState<AppView>("ai");
   useKeyboardShortcuts();
 
   // Close review on Esc
@@ -55,19 +57,25 @@ export default function App() {
   //   └────────────────────────────────────┘
   return (
     <div className="h-full w-full flex flex-col">
-      <TopBar serverOk={serverOk} />
-      <div className="flex-1 flex min-h-0">
-        <MediaBrowser />
-        <main className="flex-1 flex flex-col min-w-0 relative">
-          {reviewOpen ? (
-            <ReviewPanel onClose={() => setReviewOpen(false)} />
-          ) : (
-            <Canvas />
-          )}
-        </main>
-        <RightPanel onOpenReview={() => setReviewOpen(true)} />
-      </div>
-      <Timeline />
+      <TopBar serverOk={serverOk} view={view} onViewChange={setView} />
+      {view === "ai" ? (
+        <>
+          <div className="flex-1 flex min-h-0">
+            <MediaBrowser />
+            <main className="flex-1 flex flex-col min-w-0 relative">
+              {reviewOpen ? (
+                <ReviewPanel onClose={() => setReviewOpen(false)} />
+              ) : (
+                <Canvas />
+              )}
+            </main>
+            <RightPanel onOpenReview={() => setReviewOpen(true)} />
+          </div>
+          <Timeline />
+        </>
+      ) : (
+        <SplicingView />
+      )}
     </div>
   );
 }
