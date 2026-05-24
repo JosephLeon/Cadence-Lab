@@ -1,7 +1,6 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useProject } from "../stores/project";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { MediaAddPanel, type MediaManager } from "./MediaAddPanel";
 
 function fmtDuration(s: number): string {
   const m = Math.floor(s / 60);
@@ -16,10 +15,6 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
-const VIDEO_EXTS = ["mov", "mp4", "mkv", "m4v", "avi", "webm"];
-const isVideoFile = (name: string) =>
-  VIDEO_EXTS.includes(name.split(".").pop()?.toLowerCase() ?? "");
-
 export function MediaBrowser() {
   const media = useProject((s) => s.media);
   const active = useProject((s) => s.activeMediaPath);
@@ -28,27 +23,18 @@ export function MediaBrowser() {
   const removeMedia = useProject((s) => s.removeMedia);
   const setActive = useProject((s) => s.setActive);
 
-  const [pathInput, setPathInput] = useState("");
   const [dragOver, setDragOver] = useState(false);
-  // Upload progress per filename so multiple concurrent uploads each track
-  // their own bar. Cleared when the upload completes.
-  const [uploads, setUploads] = useState<Record<string, number>>({});
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const qc = useQueryClient();
 
-  const probeMut = useMutation({
-    mutationFn: (path: string) => api.probe(path),
-    onSuccess: (res, path) => {
-      const p = res.paths;
+  const manager: MediaManager = {
+    add: (path) => addMedia(path),
+    setProbed: (path, probe, p) => {
       // Derive the mic WAV path: same directory and stem as the source,
       // with a fixed suffix — matches what paths.mic_wav_path() writes.
-      // (Could ask the server explicitly, but this naming is stable.)
       const stem = path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
       const dir = p.analysis.substring(0, p.analysis.lastIndexOf("/"));
       const micWavPath = `${dir}/${stem}.mic.16k.wav`;
-
       updateMedia(path, {
-        probe: res.source,
+        probe,
         canonical: p,
         status: "ready",
         pipeline: {
@@ -60,62 +46,7 @@ export function MediaBrowser() {
         },
       });
     },
-    onError: (err: Error, path) => {
-      updateMedia(path, { status: "error", error: err.message });
-    },
-  });
-
-  const addByPath = (rawPath: string) => {
-    const path = rawPath.trim();
-    if (!path) return;
-    addMedia(path);
-    probeMut.mutate(path);
-    setPathInput("");
-    qc.invalidateQueries({ queryKey: ["media"] });
-  };
-
-  const uploadAndAdd = async (file: File) => {
-    if (!isVideoFile(file.name)) {
-      // Soft error — just ignore non-video drops. Could surface a toast later.
-      return;
-    }
-    setUploads((u) => ({ ...u, [file.name]: 0 }));
-    try {
-      const res = await api.upload(file, (frac) => {
-        setUploads((u) => ({ ...u, [file.name]: frac }));
-      });
-      setUploads((u) => {
-        const next = { ...u };
-        delete next[file.name];
-        return next;
-      });
-      addByPath(res.path);
-    } catch (err) {
-      setUploads((u) => {
-        const next = { ...u };
-        delete next[file.name];
-        return next;
-      });
-      // Surface the error to the user via the media list (treat the
-      // intended-path as a failed entry).
-      const fakePath = `/uploads/${file.name}`;
-      addMedia(fakePath);
-      updateMedia(fakePath, {
-        status: "error",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  const handleFiles = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach(uploadAndAdd);
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    handleFiles(e.dataTransfer.files);
+    setError: (path, error) => updateMedia(path, { status: "error", error }),
   };
 
   return (
@@ -126,7 +57,13 @@ export function MediaBrowser() {
         setDragOver(true);
       }}
       onDragLeave={() => setDragOver(false)}
-      onDrop={onDrop}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        // Files dropped on the panel are handled by MediaAddPanel via its
+        // own input; here we just absorb the drop so the browser doesn't
+        // navigate to the file URL.
+      }}
     >
       <div className="h-10 shrink-0 border-b border-border flex items-center px-3">
         <h2 className="text-sm font-medium text-text-secondary uppercase tracking-wider">
@@ -134,74 +71,7 @@ export function MediaBrowser() {
         </h2>
       </div>
 
-      {/* Add controls — drop zone, file picker, or path input */}
-      <div className="p-3 border-b border-border space-y-2">
-        {/* Hidden file input — triggered by the button below */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="video/*,.mov,.mp4,.mkv,.m4v,.avi,.webm"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            handleFiles(e.target.files);
-            e.target.value = ""; // reset so same file can be picked again
-          }}
-        />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="w-full h-9 rounded-md border border-dashed border-border hover:border-accent hover:bg-accent/5 text-sm text-text-secondary hover:text-text-primary transition-colors flex items-center justify-center gap-2"
-          title="…or drop files anywhere on this panel"
-        >
-          <span className="text-base">＋</span>
-          <span>Choose video file…</span>
-        </button>
-
-        {/* Path input — for files already on disk */}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            addByPath(pathInput);
-          }}
-        >
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={pathInput}
-              onChange={(e) => setPathInput(e.target.value)}
-              placeholder="…or paste a path"
-              className="flex-1 min-w-0 h-8 rounded-md border border-border bg-bg px-2 text-sm placeholder:text-text-muted focus:outline-none focus:border-accent"
-            />
-            <button
-              type="submit"
-              disabled={!pathInput.trim() || probeMut.isPending}
-              className="shrink-0 h-8 px-3 rounded-md bg-bg-elevated hover:bg-border text-text-secondary text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            >
-              Add
-            </button>
-          </div>
-        </form>
-
-        {/* Active uploads */}
-        {Object.entries(uploads).map(([name, frac]) => (
-          <div key={name} className="px-1">
-            <div className="flex items-center justify-between text-[10px] mb-1">
-              <span className="truncate text-text-secondary" title={name}>
-                {name}
-              </span>
-              <span className="text-text-muted font-mono shrink-0 ml-2">
-                {Math.round(frac * 100)}%
-              </span>
-            </div>
-            <div className="h-1 bg-bg-elevated rounded-full overflow-hidden">
-              <div
-                className="h-full bg-accent transition-all duration-150"
-                style={{ width: `${Math.max(2, frac * 100)}%` }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
+      <MediaAddPanel manager={manager} />
 
       {/* Media list */}
       <div className="flex-1 overflow-y-auto">
