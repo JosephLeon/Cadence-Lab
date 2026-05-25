@@ -35,10 +35,11 @@ export function WelcomeScreen() {
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-4">
           <button
+            type="button"
             onClick={() => setCreating(true)}
-            className="rounded-lg border border-border bg-bg-panel hover:bg-bg-elevated hover:border-accent transition-colors text-left p-5"
+            className="block w-full rounded-lg border border-border bg-bg-panel hover:bg-bg-elevated hover:border-accent transition-colors text-left p-5"
           >
             <div className="text-lg font-medium text-text-primary mb-1">
               ＋ New project
@@ -49,19 +50,23 @@ export function WelcomeScreen() {
             </div>
           </button>
 
-          <div className="rounded-lg border border-border bg-bg-panel p-5">
-            <div className="text-lg font-medium text-text-primary mb-1">
+          <section className="rounded-lg border border-border bg-bg-panel p-5">
+            <div className="text-lg font-medium text-text-primary mb-2">
               Open recent
             </div>
             {projectsQuery.isLoading ? (
               <div className="text-xs text-text-muted">Loading…</div>
             ) : projectsQuery.data?.projects.length ? (
-              <ul className="space-y-1 mt-2 max-h-48 overflow-y-auto">
+              <ul className="space-y-1 max-h-64 overflow-y-auto">
                 {projectsQuery.data.projects.map((p) => (
                   <ProjectRow
                     key={p.slug}
                     summary={p}
-                    onOpen={() => open(p.slug).catch(() => {})}
+                    onOpen={() => {
+                      void open(p.slug).catch((e) => {
+                        console.error("[WelcomeScreen] open failed:", e);
+                      });
+                    }}
                   />
                 ))}
               </ul>
@@ -70,7 +75,7 @@ export function WelcomeScreen() {
                 No projects yet. Create one to get started.
               </div>
             )}
-          </div>
+          </section>
         </div>
 
         {projectsQuery.data && (
@@ -99,9 +104,14 @@ function ProjectRow({
   return (
     <li>
       <button
-        onClick={onOpen}
+        type="button"
+        onClick={(e) => {
+          console.log("[ProjectRow] clicked", summary.slug);
+          e.stopPropagation();
+          onOpen();
+        }}
         disabled={summary.broken}
-        className="w-full text-left px-2 py-1.5 rounded-md hover:bg-bg-elevated transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        className="w-full text-left px-2 py-1.5 rounded-md hover:bg-bg-elevated cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <div className="text-sm font-medium text-text-primary truncate">
           {summary.name}

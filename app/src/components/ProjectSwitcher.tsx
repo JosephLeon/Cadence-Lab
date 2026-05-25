@@ -128,7 +128,12 @@ export function ProjectSwitcher() {
                     <button
                       onClick={() => {
                         setPopoverOpen(false);
-                        open(p.slug).catch(() => {});
+                        void open(p.slug).catch((e) => {
+                          console.error(
+                            "[ProjectSwitcher] open failed:",
+                            e,
+                          );
+                        });
                       }}
                       disabled={p.broken}
                       className="w-full text-left px-3 py-2 hover:bg-bg-elevated transition-colors disabled:opacity-50"
