@@ -43,6 +43,7 @@ import functools
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -398,6 +399,193 @@ def render(
                 1.0,
                 f"Done — {output_path.name} "
                 f"({size_mb:.1f} MB, {resolved_encoder})",
+            )
+    finally:
+        graph_path.unlink(missing_ok=True)
+
+    return output_path
+
+
+# ─── Splice render (multi-clip assembly) ─────────────────────────────────────
+
+
+@dataclass
+class SpliceClipSpec:
+    """One entry in a splice timeline.
+
+    - ``kind="video"``: ``source_path`` plus ``source_start``/``source_end``
+      define the sub-range of the source to include.
+    - ``kind="blank"``: ``duration`` seconds of black video + silent audio.
+    """
+    kind: Literal["video", "blank"]
+    source_path: Path | None = None
+    source_start: float = 0.0
+    source_end: float = 0.0
+    duration: float = 0.0
+
+    def length(self) -> float:
+        return self.source_end - self.source_start if self.kind == "video" else self.duration
+
+
+def splice_render(
+    clips: list[SpliceClipSpec],
+    output_path: Path,
+    *,
+    target_width: int = 1920,
+    target_height: int = 1080,
+    target_fps: int = 30,
+    encoder: EncoderChoice = "auto",
+    audio_bitrate: str = "192k",
+    progress: ProgressFn | None = None,
+) -> Path:
+    """Concatenate the given clips into a single MP4.
+
+    Every input is normalized to the target resolution + fps + stereo 48k
+    audio before concat, so mismatched sources combine cleanly. Blank spans
+    are synthesized as `color=c=black` video + `anullsrc` audio at the same
+    target geometry.
+
+    Per-segment audio fades are applied at every join (not just video/blank
+    joins) so cuts between videos with different ambient floors are
+    click-free.
+    """
+    if not clips:
+        raise RenderError("splice render: no clips supplied")
+    for c in clips:
+        if c.kind == "video":
+            if not c.source_path or not Path(c.source_path).exists():
+                raise RenderError(f"source not found: {c.source_path}")
+        if c.length() <= 0:
+            raise RenderError(f"zero-length clip in splice ({c})")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_encoder = _resolve_encoder(encoder)
+    total = sum(c.length() for c in clips)
+
+    if progress:
+        progress(
+            0.0,
+            f"Building splice graph for {len(clips)} clips "
+            f"({total:.1f}s total, encoder: {resolved_encoder})...",
+        )
+
+    # Build -i input flags + record each clip's input index. Blank clips
+    # consume two inputs (video + audio); video clips consume one.
+    input_args: list[str] = []
+    # For each clip, store (video_input_index, audio_input_index).
+    clip_inputs: list[tuple[int, int]] = []
+    next_idx = 0
+    for c in clips:
+        if c.kind == "video":
+            input_args += ["-i", str(c.source_path)]
+            clip_inputs.append((next_idx, next_idx))
+            next_idx += 1
+        else:
+            input_args += [
+                "-f", "lavfi",
+                "-i", f"color=c=black:s={target_width}x{target_height}:r={target_fps}:d={c.duration:.6f}",
+                "-f", "lavfi",
+                "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000:d={c.duration:.6f}",
+            ]
+            clip_inputs.append((next_idx, next_idx + 1))
+            next_idx += 2
+
+    # Per-clip filter chains: trim + normalize + per-end fades.
+    HALF_FADE = 0.0075  # 15ms total — matches the AI-pacing renderer
+    lines: list[str] = []
+    for i, (c, (vi, ai)) in enumerate(zip(clips, clip_inputs)):
+        dur = c.length()
+        fade = max(min(HALF_FADE, dur / 4), 0.001)
+        fade_out_st = max(dur - fade, 0.0)
+        if c.kind == "video":
+            lines.append(
+                f"[{vi}:v]trim=start={c.source_start:.6f}:end={c.source_end:.6f},"
+                f"setpts=PTS-STARTPTS,"
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={target_fps},setsar=1[v{i}]"
+            )
+            lines.append(
+                f"[{ai}:a]atrim=start={c.source_start:.6f}:end={c.source_end:.6f},"
+                f"asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"afade=t=in:st=0:d={fade:.6f},"
+                f"afade=t=out:st={fade_out_st:.6f}:d={fade:.6f}[a{i}]"
+            )
+        else:
+            # Blank inputs come from lavfi already at the right geometry; just
+            # relabel and add the same fade pattern for consistent joins.
+            lines.append(f"[{vi}:v]setpts=PTS-STARTPTS,setsar=1[v{i}]")
+            lines.append(
+                f"[{ai}:a]asetpts=PTS-STARTPTS,"
+                f"afade=t=in:st=0:d={fade:.6f},"
+                f"afade=t=out:st={fade_out_st:.6f}:d={fade:.6f}[a{i}]"
+            )
+
+    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(len(clips)))
+    lines.append(f"{concat_inputs}concat=n={len(clips)}:v=1:a=1[v_out][a_out]")
+    filter_graph = ";\n".join(lines)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, prefix="ve_splice_",
+    ) as f:
+        f.write(filter_graph)
+        graph_path = Path(f.name)
+
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-hide_banner", "-loglevel", "warning",
+            *input_args,
+            "-filter_complex_script", str(graph_path),
+            "-map", "[v_out]",
+            "-map", "[a_out]",
+            *_encoder_args(resolved_encoder),
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            str(output_path),
+        ]
+
+        if progress:
+            progress(
+                0.02,
+                f"Encoding {total:.1f}s assembly ({resolved_encoder})...",
+            )
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        expected = total if total > 0 else 1.0
+        assert proc.stdout is not None
+        stderr_tail: list[str] = []
+        for line in proc.stdout:
+            t = _parse_out_time(line)
+            if t is not None and progress:
+                frac = min(t / expected, 0.99)
+                progress(
+                    frac,
+                    f"Encoding... {t:.1f}s / {total:.1f}s ({frac * 100:.0f}%)",
+                )
+            if line.strip() == "progress=end":
+                break
+
+        rc = proc.wait()
+        if proc.stderr is not None:
+            stderr_tail = proc.stderr.read().splitlines()[-40:]
+
+        if rc != 0:
+            raise RenderError(
+                f"ffmpeg failed (exit {rc}, encoder={resolved_encoder}). "
+                f"Last stderr:\n" + "\n".join(stderr_tail)
+            )
+
+        if progress:
+            size_mb = output_path.stat().st_size / 1_048_576
+            progress(
+                1.0,
+                f"Done — {output_path.name} ({size_mb:.1f} MB, {resolved_encoder})",
             )
     finally:
         graph_path.unlink(missing_ok=True)

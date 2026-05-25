@@ -22,21 +22,27 @@ export interface SpliceMediaItem {
   error?: string;
 }
 
-export interface SpliceClip {
-  id: string;
-  sourcePath: string;
-  /** Seconds into the source where this clip starts playing. */
-  sourceStart: number;
-  /** Seconds into the source where this clip stops. */
-  sourceEnd: number;
-  /** Full length of the underlying source video, in seconds. Used to map
-   *  the source's thumbnail sprite onto a clip showing only a sub-range. */
-  sourceDuration: number;
-}
+/** A timeline entry is either a sub-range of a real video, or a span of
+ *  blank black that the export pipeline fills with a black video + silent
+ *  audio. */
+export type SpliceClip =
+  | {
+      kind: "video";
+      id: string;
+      sourcePath: string;
+      sourceStart: number;
+      sourceEnd: number;
+      sourceDuration: number;
+    }
+  | {
+      kind: "blank";
+      id: string;
+      /** Visible length in seconds. */
+      duration: number;
+    };
 
-/** Derived: the visible length of a clip on the timeline. */
 export const clipDuration = (c: SpliceClip): number =>
-  c.sourceEnd - c.sourceStart;
+  c.kind === "video" ? c.sourceEnd - c.sourceStart : c.duration;
 
 interface SplicingState {
   library: SpliceMediaItem[];
@@ -52,6 +58,8 @@ interface SplicingState {
   removeMedia: (path: string) => void;
 
   addClip: (sourcePath: string, sourceDuration: number, atIndex?: number) => void;
+  /** Insert a blank black span at the given timeline index. */
+  addBlank: (duration: number, atIndex: number) => void;
   removeClip: (id: string) => void;
   moveClip: (id: string, toIndex: number) => void;
   /** Split the clip currently under the global playhead into two clips at
@@ -59,6 +67,11 @@ interface SplicingState {
   splitAtPlayhead: () => void;
   setPlayhead: (s: number) => void;
   setPlaying: (p: boolean) => void;
+
+  /** Persisted "most recent" duration the user picked for adding space.
+   *  Defaults to 5s and survives reloads via localStorage. */
+  lastSpaceSeconds: number;
+  setLastSpaceSeconds: (sec: number) => void;
 
   /** Replace selection with the given id (additive=false) or toggle the id
    *  in the current selection (additive=true). */
@@ -70,12 +83,27 @@ interface SplicingState {
 let _idCounter = 0;
 const nextId = () => `clip-${Date.now()}-${++_idCounter}`;
 
+const LAST_SPACE_KEY = "cadence-lab:splice-last-space-seconds";
+function loadLastSpace(): number {
+  try {
+    const raw = localStorage.getItem(LAST_SPACE_KEY);
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  } catch {
+    /* ignore */
+  }
+  return 5;
+}
+
 export const useSplicing = create<SplicingState>((set) => ({
   library: [],
   timeline: [],
   playhead: 0,
   isPlaying: false,
   selectedIds: [],
+  lastSpaceSeconds: loadLastSpace(),
 
   addMedia: (path) =>
     set((s) => {
@@ -92,12 +120,14 @@ export const useSplicing = create<SplicingState>((set) => ({
 
   removeMedia: (path) =>
     set((s) => {
+      const isOrphan = (c: SpliceClip) =>
+        c.kind === "video" && c.sourcePath === path;
       const survivingClipIds = new Set(
-        s.timeline.filter((c) => c.sourcePath !== path).map((c) => c.id),
+        s.timeline.filter((c) => !isOrphan(c)).map((c) => c.id),
       );
       return {
         library: s.library.filter((m) => m.path !== path),
-        timeline: s.timeline.filter((c) => c.sourcePath !== path),
+        timeline: s.timeline.filter((c) => !isOrphan(c)),
         selectedIds: s.selectedIds.filter((id) => survivingClipIds.has(id)),
       };
     }),
@@ -105,6 +135,7 @@ export const useSplicing = create<SplicingState>((set) => ({
   addClip: (sourcePath, sourceDuration, atIndex) =>
     set((s) => {
       const clip: SpliceClip = {
+        kind: "video",
         id: nextId(),
         sourcePath,
         sourceStart: 0,
@@ -116,6 +147,18 @@ export const useSplicing = create<SplicingState>((set) => ({
       }
       const next = [...s.timeline];
       next.splice(Math.max(0, atIndex), 0, clip);
+      return { timeline: next };
+    }),
+
+  addBlank: (duration, atIndex) =>
+    set((s) => {
+      const clip: SpliceClip = {
+        kind: "blank",
+        id: nextId(),
+        duration: Math.max(0.1, duration),
+      };
+      const next = [...s.timeline];
+      next.splice(Math.max(0, Math.min(atIndex, next.length)), 0, clip);
       return { timeline: next };
     }),
 
@@ -140,22 +183,19 @@ export const useSplicing = create<SplicingState>((set) => ({
     set((s) => {
       const at = clipAtPlayhead(s.timeline, s.playhead);
       if (!at) return s;
-      // Don't split at exact boundaries — would produce a zero-length clip.
       const EPSILON = 0.05;
-      if (at.offset < EPSILON || at.offset > clipDuration(at.clip) - EPSILON) {
-        return s;
+      const dur = clipDuration(at.clip);
+      if (at.offset < EPSILON || at.offset > dur - EPSILON) return s;
+      let left: SpliceClip;
+      let right: SpliceClip;
+      if (at.clip.kind === "video") {
+        const splitSource = at.clip.sourceStart + at.offset;
+        left = { ...at.clip, id: nextId(), sourceEnd: splitSource };
+        right = { ...at.clip, id: nextId(), sourceStart: splitSource };
+      } else {
+        left = { ...at.clip, id: nextId(), duration: at.offset };
+        right = { ...at.clip, id: nextId(), duration: dur - at.offset };
       }
-      const splitSource = at.clip.sourceStart + at.offset;
-      const left: SpliceClip = {
-        ...at.clip,
-        id: nextId(),
-        sourceEnd: splitSource,
-      };
-      const right: SpliceClip = {
-        ...at.clip,
-        id: nextId(),
-        sourceStart: splitSource,
-      };
       const next = [...s.timeline];
       next.splice(at.index, 1, left, right);
       return { timeline: next };
@@ -163,6 +203,16 @@ export const useSplicing = create<SplicingState>((set) => ({
 
   setPlayhead: (s) => set({ playhead: Math.max(0, s) }),
   setPlaying: (p) => set({ isPlaying: p }),
+
+  setLastSpaceSeconds: (sec) => {
+    const v = Math.max(0.1, sec);
+    try {
+      localStorage.setItem(LAST_SPACE_KEY, String(v));
+    } catch {
+      /* ignore */
+    }
+    set({ lastSpaceSeconds: v });
+  },
 
   selectClip: (id, additive) =>
     set((s) => {

@@ -9,6 +9,7 @@ import {
 } from "../stores/splicing";
 import { spliceVideoRef } from "../stores/spliceVideoRef";
 import { api } from "../api/client";
+import type { JobEvent } from "../api/types";
 import { MediaAddPanel, type MediaManager } from "./MediaAddPanel";
 
 const DRAG_MIME = "application/x-cadence-splice";
@@ -38,10 +39,19 @@ export function SplicingView() {
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.key === " ") {
         e.preventDefault();
-        const v = spliceVideoRef.current;
-        if (!v) return;
-        if (v.paused) v.play().catch(() => {});
-        else v.pause();
+        const st = useSplicing.getState();
+        const at = clipAtPlayhead(st.timeline, st.playhead);
+        // On a video clip, drive the underlying <video>. On a blank (or
+        // empty timeline), toggle the store's isPlaying so the wall-clock
+        // timer in Preview advances the playhead through the black span.
+        if (at && at.clip.kind === "video") {
+          const v = spliceVideoRef.current;
+          if (!v) return;
+          if (v.paused) v.play().catch(() => {});
+          else v.pause();
+        } else if (at) {
+          st.setPlaying(!st.isPlaying);
+        }
       } else if (e.key === "b" || e.key === "B") {
         e.preventDefault();
         splitAtPlayhead();
@@ -189,19 +199,21 @@ function Preview() {
   const timeline = useSplicing((s) => s.timeline);
   const playhead = useSplicing((s) => s.playhead);
   const setPlayhead = useSplicing((s) => s.setPlayhead);
+  const isPlaying = useSplicing((s) => s.isPlaying);
+  const setPlaying = useSplicing((s) => s.setPlaying);
 
   const at = clipAtPlayhead(timeline, playhead);
   const total = totalDuration(timeline);
 
-  const currentSrc = at ? api.sourceUrl(at.clip.sourcePath) : null;
+  const onVideoClip = at && at.clip.kind === "video";
+  const currentSrc = onVideoClip ? api.sourceUrl(at!.clip.sourcePath) : null;
   const lastSrcRef = useRef<string | null>(null);
 
-  // Seek + swap source as the playhead moves. The video's currentTime is
-  // (clip.sourceStart + offset-within-clip) because a single clip may only
-  // play a sub-range of its underlying source after splits.
+  // Seek + swap source whenever the underlying clip changes. Only meaningful
+  // for video clips — blank clips have no video element.
   useEffect(() => {
     const el = spliceVideoRef.current;
-    if (!el || !at) return;
+    if (!el || !at || at.clip.kind !== "video") return;
     const target = at.clip.sourceStart + at.offset;
     if (lastSrcRef.current !== currentSrc) {
       lastSrcRef.current = currentSrc;
@@ -217,11 +229,34 @@ function Preview() {
     }
   }, [currentSrc, at]);
 
-  // Auto-advance: when playback runs past the current clip's sourceEnd,
-  // jump the global playhead to the next clip's start so the source swap
-  // happens via the effect above. The last clip just stops at total.
+  // Wall-clock timer that drives the playhead through blank clips when
+  // playback is active. Real video clips use the <video> element's own
+  // timeupdate to advance.
+  useEffect(() => {
+    if (!isPlaying || !at || at.clip.kind !== "blank") return;
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      const next = useSplicing.getState().playhead + dt;
+      const tot = totalDuration(useSplicing.getState().timeline);
+      if (next >= tot) {
+        useSplicing.getState().setPlayhead(tot);
+        useSplicing.getState().setPlaying(false);
+        return;
+      }
+      useSplicing.getState().setPlayhead(next);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isPlaying, at?.clip.id, at?.clip.kind]);
+
+  // Auto-advance: when video playback runs past the current clip's
+  // sourceEnd, jump the global playhead to the next clip's start.
   const onTimeUpdate = (e: React.SyntheticEvent<HTMLVideoElement>) => {
-    if (!at) return;
+    if (!at || at.clip.kind !== "video") return;
     const el = e.currentTarget;
     if (el.currentTime >= at.clip.sourceEnd - 0.02) {
       const nextClipStart = at.clipStart + clipDuration(at.clip);
@@ -239,7 +274,7 @@ function Preview() {
   return (
     <main className="flex-1 flex flex-col min-w-0 bg-bg-elevated">
       <div className="flex-1 flex items-center justify-center min-h-0 p-4">
-        {at ? (
+        {at && at.clip.kind === "video" ? (
           <video
             ref={(el) => {
               spliceVideoRef.current = el;
@@ -248,28 +283,198 @@ function Preview() {
             controls
             className="max-w-full max-h-full rounded-md shadow-lg bg-black"
             onTimeUpdate={onTimeUpdate}
+            onPlay={() => setPlaying(true)}
+            onPause={() => setPlaying(false)}
           />
+        ) : at && at.clip.kind === "blank" ? (
+          <div className="w-full max-w-3xl aspect-video bg-black rounded-md shadow-lg flex items-center justify-center text-text-muted text-xs">
+            (blank · {fmtDuration(at.clip.duration)})
+          </div>
         ) : (
           <div className="text-text-muted text-sm text-center">
             Drag clips from the left panel onto the timeline below.
             <div className="mt-2 text-xs">
-              Space: play/pause · B: split · ⌫: delete selected · Cmd+wheel: zoom
+              Space: play/pause · B: split · ⌫: delete · Cmd+wheel: zoom
             </div>
           </div>
         )}
       </div>
-      <div className="h-8 shrink-0 border-t border-border flex items-center px-4 text-xs text-text-secondary gap-3">
+      <div className="h-10 shrink-0 border-t border-border flex items-center px-4 text-xs text-text-secondary gap-3">
         <span className="font-mono">
           {fmtDuration(playhead)} / {fmtDuration(total)}
         </span>
         {at && (
-          <span className="truncate text-text-muted">
+          <span className="truncate text-text-muted flex-1">
             clip {at.index + 1} of {timeline.length} ·{" "}
-            {at.clip.sourcePath.split("/").pop()}
+            {at.clip.kind === "video"
+              ? at.clip.sourcePath.split("/").pop()
+              : "blank"}
           </span>
         )}
+        {!at && <div className="flex-1" />}
+        <ExportButton />
       </div>
     </main>
+  );
+}
+
+// ─── Export ───────────────────────────────────────────────────────────────────
+
+function ExportButton() {
+  const timeline = useSplicing((s) => s.timeline);
+  const library = useSplicing((s) => s.library);
+  const [job, setJob] = useState<
+    | { status: "idle" }
+    | { status: "running"; progress: number; message: string }
+    | { status: "done"; outputName: string; outputPath: string }
+    | { status: "error"; error: string }
+  >({ status: "idle" });
+
+  const total = totalDuration(timeline);
+  const disabled = timeline.length === 0 || job.status === "running";
+
+  // Pick reasonable defaults for target geometry: use the largest probed
+  // dimensions in the library so we don't downscale anyone.
+  const targetWidth = Math.max(
+    1920,
+    ...library
+      .map((m) => m.probe?.width ?? 0)
+      .filter((n): n is number => Number.isFinite(n)),
+  );
+  const targetHeight = Math.max(
+    1080,
+    ...library
+      .map((m) => m.probe?.height ?? 0)
+      .filter((n): n is number => Number.isFinite(n)),
+  );
+
+  const onClick = async () => {
+    const suggested = `splice_${new Date()
+      .toISOString()
+      .replace(/[:T]/g, "-")
+      .slice(0, 19)}`;
+    const name = window.prompt(
+      "Export filename (without .mp4):",
+      suggested,
+    );
+    if (!name) return;
+    setJob({ status: "running", progress: 0, message: "Submitting…" });
+    try {
+      const handle = await api.spliceRender({
+        output_name: name,
+        target_width: targetWidth,
+        target_height: targetHeight,
+        clips: timeline.map((c) =>
+          c.kind === "video"
+            ? {
+                kind: "video",
+                source_path: c.sourcePath,
+                source_start: c.sourceStart,
+                source_end: c.sourceEnd,
+              }
+            : { kind: "blank", duration: c.duration },
+        ),
+      });
+      const unsub = api.subscribeJob(
+        handle.job_id,
+        (ev: JobEvent) => {
+          if (ev._terminal) {
+            unsub();
+            void api.getJob(handle.job_id).then((j) => {
+              if (j.status === "done") {
+                const r = j.result as
+                  | { output_name?: string; output_path?: string }
+                  | null;
+                setJob({
+                  status: "done",
+                  outputName: r?.output_name ?? `${name}.mp4`,
+                  outputPath: r?.output_path ?? "",
+                });
+              } else {
+                setJob({
+                  status: "error",
+                  error: j.error ?? "Export failed",
+                });
+              }
+            });
+            return;
+          }
+          if (typeof ev.progress === "number") {
+            setJob({
+              status: "running",
+              progress: ev.progress,
+              message: ev.message ?? "",
+            });
+          }
+        },
+        () => setJob({ status: "error", error: "Lost connection to server" }),
+      );
+    } catch (e) {
+      setJob({
+        status: "error",
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
+  if (job.status === "running") {
+    return (
+      <div className="flex items-center gap-2 min-w-[220px]">
+        <div className="flex-1 h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+          <div
+            className="h-full bg-accent transition-all duration-150"
+            style={{ width: `${Math.max(2, job.progress * 100)}%` }}
+          />
+        </div>
+        <span className="font-mono text-text-muted shrink-0">
+          {Math.round(job.progress * 100)}%
+        </span>
+      </div>
+    );
+  }
+  if (job.status === "done") {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-emerald-400 truncate" title={job.outputPath}>
+          ✓ {job.outputName}
+        </span>
+        <button
+          onClick={() => setJob({ status: "idle" })}
+          className="h-7 px-2 rounded bg-bg-elevated hover:bg-border text-xs"
+        >
+          Export again
+        </button>
+      </div>
+    );
+  }
+  if (job.status === "error") {
+    return (
+      <div className="flex items-center gap-2">
+        <span className="text-rose-400 truncate" title={job.error}>
+          ✗ {job.error}
+        </span>
+        <button
+          onClick={() => setJob({ status: "idle" })}
+          className="h-7 px-2 rounded bg-bg-elevated hover:bg-border text-xs"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="h-7 px-3 rounded bg-accent hover:bg-accent/80 text-white text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+      title={
+        disabled && timeline.length === 0
+          ? "Add clips to the timeline first"
+          : `Export ${fmtDuration(total)} assembly`
+      }
+    >
+      ▶ Export MP4
+    </button>
   );
 }
 
@@ -345,7 +550,15 @@ function SpliceTimeline() {
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [height, setHeight] = useState<number>(loadHeight);
   const [pxPerSecond, setPxPerSecond] = useState<number>(loadZoom);
+  const [contextMenu, setContextMenu] = useState<
+    { clipId: string; x: number; y: number } | null
+  >(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
+
+  const openContextMenu = (e: React.MouseEvent, clipId: string) => {
+    e.preventDefault();
+    setContextMenu({ clipId, x: e.clientX, y: e.clientY });
+  };
 
   useEffect(() => {
     try {
@@ -561,6 +774,7 @@ function SpliceTimeline() {
                   index={i}
                   pxPerSecond={pxPerSecond}
                   highlight={dragOverIndex === i}
+                  onContextMenu={openContextMenu}
                 />
               ))}
               {dragOverIndex === timeline.length && (
@@ -580,6 +794,116 @@ function SpliceTimeline() {
           )}
         </div>
       </div>
+
+      {contextMenu && (
+        <ClipContextMenu
+          clipId={contextMenu.clipId}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ClipContextMenu({
+  clipId,
+  x,
+  y,
+  onClose,
+}: {
+  clipId: string;
+  x: number;
+  y: number;
+  onClose: () => void;
+}) {
+  const timeline = useSplicing((s) => s.timeline);
+  const lastSpaceSeconds = useSplicing((s) => s.lastSpaceSeconds);
+  const setLastSpaceSeconds = useSplicing((s) => s.setLastSpaceSeconds);
+  const addBlank = useSplicing((s) => s.addBlank);
+  const removeClip = useSplicing((s) => s.removeClip);
+
+  const [seconds, setSeconds] = useState<string>(String(lastSpaceSeconds));
+  const ref = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close on outside-click or Escape.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    inputRef.current?.select();
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  const idx = timeline.findIndex((c) => c.id === clipId);
+  if (idx === -1) return null;
+
+  const parsed = Number(seconds);
+  const valid = Number.isFinite(parsed) && parsed > 0;
+
+  const insert = (where: "before" | "after") => {
+    if (!valid) return;
+    setLastSpaceSeconds(parsed);
+    addBlank(parsed, where === "before" ? idx : idx + 1);
+    onClose();
+  };
+
+  return (
+    <div
+      ref={ref}
+      style={{ left: x, top: y }}
+      className="fixed z-50 w-56 rounded-md border border-border bg-bg-panel shadow-xl text-sm overflow-hidden"
+    >
+      <div className="p-2 border-b border-border space-y-1.5">
+        <label className="block text-[10px] uppercase tracking-wider text-text-muted">
+          Seconds of blank space
+        </label>
+        <input
+          ref={inputRef}
+          type="number"
+          step="0.5"
+          min="0.1"
+          value={seconds}
+          onChange={(e) => setSeconds(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") insert("after");
+          }}
+          className="w-full h-7 rounded border border-border bg-bg px-2 text-sm focus:outline-none focus:border-accent"
+        />
+      </div>
+      <button
+        disabled={!valid}
+        onClick={() => insert("before")}
+        className="w-full px-3 py-2 text-left hover:bg-bg-elevated disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        ⬅ Add space before
+      </button>
+      <button
+        disabled={!valid}
+        onClick={() => insert("after")}
+        className="w-full px-3 py-2 text-left hover:bg-bg-elevated border-t border-border disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        Add space after ➡
+      </button>
+      <button
+        onClick={() => {
+          removeClip(clipId);
+          onClose();
+        }}
+        className="w-full px-3 py-2 text-left hover:bg-rose-500/20 text-rose-400 border-t border-border"
+      >
+        ✕ Delete clip
+      </button>
     </div>
   );
 }
@@ -681,29 +1005,19 @@ function ClipBlock({
   index,
   pxPerSecond,
   highlight,
+  onContextMenu,
 }: {
   clip: SpliceClip;
   index: number;
   pxPerSecond: number;
   highlight: boolean;
+  onContextMenu: (e: React.MouseEvent, clipId: string) => void;
 }) {
   const removeClip = useSplicing((s) => s.removeClip);
   const selectClip = useSplicing((s) => s.selectClip);
   const isSelected = useSplicing((s) => s.selectedIds.includes(clip.id));
   const dur = clipDuration(clip);
   const width = Math.max(40, dur * pxPerSecond);
-
-  const thumbsQuery = useQuery({
-    queryKey: ["thumbnails", clip.sourcePath],
-    queryFn: () => api.getThumbnails(clip.sourcePath, 60, 60),
-    staleTime: Infinity,
-  });
-
-  const peaksQuery = useQuery({
-    queryKey: ["audio-peaks", clip.sourcePath],
-    queryFn: () => api.getAudioPeaks(clip.sourcePath, 800),
-    staleTime: Infinity,
-  });
 
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.effectAllowed = "move";
@@ -714,30 +1028,14 @@ function ClipBlock({
   };
 
   const onClick = (e: React.MouseEvent) => {
-    // Click selects (use the ruler to set the playhead). Cmd/Ctrl-click
-    // toggles in the current selection for multi-select.
     e.stopPropagation();
     selectClip(clip.id, e.metaKey || e.ctrlKey);
   };
 
-  const thumbsUrl = thumbsQuery.data ? `/api${thumbsQuery.data.url}` : null;
-
-  // The thumbnail sprite spans the *full* source. For a clip showing only
-  // sourceStart..sourceEnd, we scale the sprite so the full source covers
-  // (sourceDuration / clipDuration) × the block width, then shift left so
-  // sourceStart lines up with the block's left edge.
-  const sourceScale = clip.sourceDuration / Math.max(dur, 0.001);
-  const thumbsBgSize = `${sourceScale * 100}% 100%`;
-  const thumbsBgPosX = `-${(clip.sourceStart / Math.max(dur, 0.001)) * 100}%`;
-
-  // Peaks span the full source — slice to the clip's range for the waveform.
-  const peaks = peaksQuery.data?.peaks;
-  const peaksSlice = peaks
-    ? peaks.slice(
-        Math.floor((clip.sourceStart / clip.sourceDuration) * peaks.length),
-        Math.ceil((clip.sourceEnd / clip.sourceDuration) * peaks.length),
-      )
-    : null;
+  const title =
+    clip.kind === "video"
+      ? `Clip ${index + 1} · ${clip.sourcePath.split("/").pop()} (${fmtDuration(dur)})`
+      : `Blank · ${fmtDuration(dur)}`;
 
   return (
     <>
@@ -747,6 +1045,7 @@ function ClipBlock({
         draggable
         onDragStart={onDragStart}
         onClick={onClick}
+        onContextMenu={(e) => onContextMenu(e, clip.id)}
         className={
           "group relative shrink-0 h-full border-r overflow-hidden cursor-grab active:cursor-grabbing " +
           (isSelected
@@ -754,25 +1053,19 @@ function ClipBlock({
             : "border-border bg-bg-elevated")
         }
         style={{ width }}
-        title={`Clip ${index + 1} · ${clip.sourcePath.split("/").pop()} (${fmtDuration(dur)})`}
+        title={title}
       >
-        <div
-          className="absolute inset-x-0 top-0 h-1/2 bg-black"
-          style={{
-            backgroundImage: thumbsUrl ? `url(${thumbsUrl})` : undefined,
-            backgroundSize: thumbsBgSize,
-            backgroundPosition: `${thumbsBgPosX} 0`,
-            backgroundRepeat: "no-repeat",
-          }}
-        />
-        <div className="absolute inset-x-0 bottom-0 h-1/2 bg-bg-panel">
-          {peaksSlice && peaksSlice.length > 0 && (
-            <Waveform peaks={peaksSlice} width={width} />
-          )}
-        </div>
+        {clip.kind === "video" ? (
+          <VideoClipContent clip={clip} width={width} />
+        ) : (
+          <div className="absolute inset-0 bg-black" />
+        )}
         <div className="absolute inset-x-0 top-0 h-5 bg-black/60 backdrop-blur-sm text-[10px] text-text-secondary px-1.5 flex items-center justify-between pointer-events-none">
           <span className="truncate">
-            {index + 1}. {clip.sourcePath.split("/").pop()}
+            {index + 1}.{" "}
+            {clip.kind === "video"
+              ? clip.sourcePath.split("/").pop()
+              : "blank"}
           </span>
           <span className="font-mono text-text-muted shrink-0 ml-1">
             {fmtDuration(dur)}
@@ -788,6 +1081,55 @@ function ClipBlock({
         >
           ✕
         </button>
+      </div>
+    </>
+  );
+}
+
+function VideoClipContent({
+  clip,
+  width,
+}: {
+  clip: Extract<SpliceClip, { kind: "video" }>;
+  width: number;
+}) {
+  const dur = clip.sourceEnd - clip.sourceStart;
+  const thumbsQuery = useQuery({
+    queryKey: ["thumbnails", clip.sourcePath],
+    queryFn: () => api.getThumbnails(clip.sourcePath, 60, 60),
+    staleTime: Infinity,
+  });
+  const peaksQuery = useQuery({
+    queryKey: ["audio-peaks", clip.sourcePath],
+    queryFn: () => api.getAudioPeaks(clip.sourcePath, 800),
+    staleTime: Infinity,
+  });
+  const thumbsUrl = thumbsQuery.data ? `/api${thumbsQuery.data.url}` : null;
+  const sourceScale = clip.sourceDuration / Math.max(dur, 0.001);
+  const thumbsBgSize = `${sourceScale * 100}% 100%`;
+  const thumbsBgPosX = `-${(clip.sourceStart / Math.max(dur, 0.001)) * 100}%`;
+  const peaks = peaksQuery.data?.peaks;
+  const peaksSlice = peaks
+    ? peaks.slice(
+        Math.floor((clip.sourceStart / clip.sourceDuration) * peaks.length),
+        Math.ceil((clip.sourceEnd / clip.sourceDuration) * peaks.length),
+      )
+    : null;
+  return (
+    <>
+      <div
+        className="absolute inset-x-0 top-0 h-1/2 bg-black"
+        style={{
+          backgroundImage: thumbsUrl ? `url(${thumbsUrl})` : undefined,
+          backgroundSize: thumbsBgSize,
+          backgroundPosition: `${thumbsBgPosX} 0`,
+          backgroundRepeat: "no-repeat",
+        }}
+      />
+      <div className="absolute inset-x-0 bottom-0 h-1/2 bg-bg-panel">
+        {peaksSlice && peaksSlice.length > 0 && (
+          <Waveform peaks={peaksSlice} width={width} />
+        )}
       </div>
     </>
   );

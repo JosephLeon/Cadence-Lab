@@ -88,7 +88,12 @@ from .paths import (
     rendered_path,
 )
 from .planner import plan_cuts
-from .renderer import RenderError, render as run_render
+from .renderer import (
+    RenderError,
+    SpliceClipSpec,
+    render as run_render,
+    splice_render,
+)
 from .reviewer import apply_overrides, extract_audio_clip
 from .speech import analyze as run_analyze
 
@@ -104,7 +109,7 @@ class Job:
     """One async pipeline run. Thread-safe via the GIL for our simple usage."""
 
     id: str
-    kind: Literal["analyze", "classify", "render"]
+    kind: Literal["analyze", "classify", "render", "splice"]
     status: JobStatus = "pending"
     progress: float = 0.0
     message: str = ""
@@ -141,7 +146,7 @@ _jobs: dict[str, Job] = {}
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cadence-job")
 
 
-def _new_job(kind: Literal["analyze", "classify", "render"]) -> Job:
+def _new_job(kind: Literal["analyze", "classify", "render", "splice"]) -> Job:
     job = Job(id=str(uuid.uuid4()), kind=kind)
     _jobs[job.id] = job
     return job
@@ -520,6 +525,109 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 "done",
                 result={
                     "rendered_path": str(out),
+                    "size_bytes": out.stat().st_size,
+                },
+            )
+        except (RenderError, Exception) as e:
+            job.finish("error", error=str(e))
+
+    _executor.submit(run)
+    return JobHandle(job_id=job.id)
+
+
+# ─── Splice render (multi-clip assembly) ─────────────────────────────────────
+
+
+class SpliceClipInput(BaseModel):
+    """One entry on the splice timeline. ``kind="video"`` requires source_path
+    + source_start + source_end; ``kind="blank"`` requires ``duration``."""
+    kind: Literal["video", "blank"]
+    source_path: str | None = None
+    source_start: float = 0.0
+    source_end: float = 0.0
+    duration: float = 0.0
+
+
+class SpliceRequest(BaseModel):
+    clips: list[SpliceClipInput]
+    output_name: str
+    target_width: int = 1920
+    target_height: int = 1080
+    target_fps: int = 30
+    encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
+    audio_bitrate: str = "192k"
+
+
+_SAFE_NAME_CHARS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+)
+
+
+def _sanitize_export_name(name: str) -> str:
+    """Strip path separators and disallowed characters from a user-supplied
+    output name. Disallows leading dots so we don't create hidden files."""
+    cleaned = "".join(c if c in _SAFE_NAME_CHARS else "_" for c in name.strip())
+    cleaned = cleaned.lstrip(".")
+    if not cleaned:
+        raise HTTPException(400, "output_name is empty after sanitization")
+    if cleaned.lower().endswith(".mp4"):
+        cleaned = cleaned[:-4]
+    return cleaned
+
+
+@app.post("/splice/render", response_model=JobHandle)
+def splice_render_endpoint(req: SpliceRequest) -> JobHandle:
+    """Assemble the splice timeline into a single MP4 under ``output_dir()``.
+
+    Output filename: ``<output_dir>/<sanitized_name>.mp4``. Existing files
+    are overwritten — the frontend prompts the user for a name and can
+    suggest unique ones if it wants to preserve previous exports.
+    """
+    if not req.clips:
+        raise HTTPException(400, "splice request has no clips")
+
+    specs: list[SpliceClipSpec] = []
+    for c in req.clips:
+        if c.kind == "video":
+            if not c.source_path:
+                raise HTTPException(400, "video clip missing source_path")
+            specs.append(
+                SpliceClipSpec(
+                    kind="video",
+                    source_path=Path(c.source_path),
+                    source_start=c.source_start,
+                    source_end=c.source_end,
+                )
+            )
+        else:
+            if c.duration <= 0:
+                raise HTTPException(400, "blank clip needs positive duration")
+            specs.append(SpliceClipSpec(kind="blank", duration=c.duration))
+
+    safe_name = _sanitize_export_name(req.output_name)
+    out = output_dir() / f"{safe_name}.mp4"
+
+    job = _new_job("splice")
+
+    def run() -> None:
+        try:
+            job.status = "running"
+            cb = _progress_for(job)
+            splice_render(
+                specs,
+                out,
+                target_width=req.target_width,
+                target_height=req.target_height,
+                target_fps=req.target_fps,
+                encoder=req.encoder,
+                audio_bitrate=req.audio_bitrate,
+                progress=cb,
+            )
+            job.finish(
+                "done",
+                result={
+                    "output_path": str(out),
+                    "output_name": out.name,
                     "size_bytes": out.stat().st_size,
                 },
             )

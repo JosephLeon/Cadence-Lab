@@ -83,6 +83,28 @@ export const api = {
       body: JSON.stringify(req),
     }),
 
+  spliceRender: (req: {
+    clips: Array<
+      | {
+          kind: "video";
+          source_path: string;
+          source_start: number;
+          source_end: number;
+        }
+      | { kind: "blank"; duration: number }
+    >;
+    output_name: string;
+    target_width?: number;
+    target_height?: number;
+    target_fps?: number;
+    encoder?: "auto" | "h264_videotoolbox" | "libx264";
+    audio_bitrate?: string;
+  }) =>
+    jsonFetch<JobHandle>("/splice/render", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
   render: (req: {
     analysis_path: string;
     plan_path?: string;
