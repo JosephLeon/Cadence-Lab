@@ -77,8 +77,30 @@ You have four mutation tools:
 - `propose_set_audio_setting` — enhance_speech, auto_duck, ducking_db.
 
 You **cannot** (yet): modify the splice timeline, add/remove blanks, move
-clips, trigger renders, or perform semantic search / computer vision /
-audio-event detection (sniffles, throat clears).
+clips, trigger renders, or perform semantic search / computer vision.
+
+## Audio events (sniffles, throat clears, coughs, lip smacks)
+
+These aren't in the speech transcript or the classifier's filler list —
+they're non-speech sounds. There's a separate **opt-in scan** that
+detects them; once it's been run, `list_audio_events` returns the
+results. If a user asks to remove sniffles/coughs/etc:
+
+1. Call `list_audio_events` (filter by `kinds` to what the user asked
+   for). If it returns `status: "needs_scan"`, tell the user the
+   detection pass needs to run (~1-3 min for typical videos) and call
+   `propose_run_audio_event_scan` with a clear summary. The user has
+   to Apply it explicitly.
+2. **After the scan completes the system automatically sends you a
+   follow-up message** of the form: `(Audio-event scan complete — N
+   events found.) Continue with the previous request: "<original>"`.
+   When you see this, call `list_audio_events` again with the same
+   filter and proceed to step 3. The user doesn't have to retype
+   anything.
+3. With events in hand, propose `propose_add_custom_cut` for each
+   event matching what the user asked to remove. Use the event's
+   `start` and `end` directly; include the `kind` and timestamp in the
+   summary so the user can verify before applying.
 
 ## Choosing the right tool
 
@@ -89,6 +111,7 @@ audio-event detection (sniffles, throat clears).
 | Cut arbitrary unflagged content (vocalizations, noises)    | `propose_add_custom_cut`         |
 | Extract a short clip for YouTube / social / a compilation  | `propose_create_highlight_clip`  |
 | Change audio enhancement settings                          | `propose_set_audio_setting`      |
+| Remove sniffles / throat clears / coughs / lip smacks      | `list_audio_events` → `propose_add_custom_cut` per event |
 
 For custom cuts, **always use `get_transcript_around` first** to find the
 exact word boundaries, then propose the cut with those timestamps.
@@ -226,6 +249,37 @@ READ_TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "list_audio_events",
+        "description": (
+            "List non-speech audio events (sniffles, throat clears, coughs, "
+            "lip smacks, etc.) detected by the opt-in event-detection pass. "
+            "Returns events with `start`, `end`, `kind`, and `confidence`. "
+            "Use this when the user asks about removing non-speech sounds.\n\n"
+            "If the scan hasn't been run yet, this returns "
+            "`{ status: 'needs_scan' }`. In that case, tell the user the "
+            "scan needs to run (~2 minutes for a 30-min video) and offer "
+            "to kick it off via `propose_run_audio_event_scan`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "kinds": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional filter — only return events of these kinds. "
+                        "Valid kinds: sniff, throat_clear, cough, sneeze, "
+                        "hiccup, burp."
+                    ),
+                },
+                "min_confidence": {
+                    "type": "number",
+                    "description": "Filter out events below this confidence (0–1).",
+                },
+            },
+        },
+    },
+    {
         "name": "get_full_transcript",
         "description": (
             "Return the FULL transcript of the active source as a list of "
@@ -239,6 +293,30 @@ READ_TOOLS: list[dict[str, Any]] = [
 ]
 
 ACTION_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "propose_run_audio_event_scan",
+        "description": (
+            "Propose running the (slow, opt-in) audio-event detection pass "
+            "on the active source. Only use when `list_audio_events` returns "
+            "`needs_scan` and the user has agreed to wait for it. The user "
+            "must explicitly Apply this action — it kicks off a ~1-3 minute "
+            "background job. Once it completes the user can re-ask their "
+            "question and you can read the results via `list_audio_events`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "One-line summary, e.g. 'Run audio-event scan "
+                        "(~2 min) so we can find sniffles in this video.'"
+                    ),
+                },
+            },
+            "required": ["summary"],
+        },
+    },
     {
         "name": "propose_create_highlight_clip",
         "description": (
@@ -539,6 +617,46 @@ def _dispatch_read_tool(
                     })
         return {"window_start": t - win, "window_end": t + win, "words": words}
 
+    if name == "list_audio_events":
+        from .models import AudioEventBundle
+        from .paths import events_path
+
+        abs_src = ctx.active_source_abs()
+        if not abs_src:
+            return "No active source. The user needs to load one in the AI tab."
+        ep = events_path(abs_src)
+        if not ep.exists():
+            return {
+                "status": "needs_scan",
+                "message": (
+                    "Audio-event detection hasn't been run for this source. "
+                    "Propose `propose_run_audio_event_scan` to kick it off."
+                ),
+            }
+        try:
+            bundle = AudioEventBundle.model_validate_json(ep.read_text())
+        except Exception as e:
+            return f"failed to load events: {e}"
+        kinds_filter = set(args.get("kinds") or [])
+        min_conf = float(args.get("min_confidence") or 0.0)
+        out_events: list[dict[str, Any]] = []
+        for e in bundle.events:
+            if kinds_filter and e.kind not in kinds_filter:
+                continue
+            if e.confidence < min_conf:
+                continue
+            out_events.append({
+                "start": round(e.start, 2),
+                "end": round(e.end, 2),
+                "kind": e.kind,
+                "confidence": round(e.confidence, 2),
+            })
+        return {
+            "status": "ok",
+            "events": out_events,
+            "total_in_scan": len(bundle.events),
+        }
+
     if name == "get_full_transcript":
         analysis = _load_analysis(ctx)
         if analysis is None:
@@ -716,6 +834,12 @@ def _make_proposed_action(name: str, args: dict[str, Any]) -> ProposedAction:
     """Translate a `propose_<X>` tool call into a structured ProposedAction
     the frontend can apply via its action dispatcher."""
     summary = args.get("summary", name)
+    if name == "propose_run_audio_event_scan":
+        return ProposedAction(
+            type="run_audio_event_scan",
+            summary=summary,
+            params={},
+        )
     if name == "propose_create_highlight_clip":
         return ProposedAction(
             type="add_splice_clip",

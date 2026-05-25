@@ -151,6 +151,7 @@ async function probeIntoAITab(
         planPath: p.plan_exists ? p.plan : undefined,
         renderedPath: p.rendered_exists ? p.rendered : undefined,
         micWavPath: p.analysis_exists ? micWavPath : undefined,
+        eventsPath: p.events_exists ? p.events : undefined,
       },
     });
   } catch (e) {

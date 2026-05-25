@@ -139,6 +139,12 @@ export const api = {
       body: JSON.stringify(req),
     }),
 
+  detectEvents: (req: { source_path: string; mic_track?: number }) =>
+    jsonFetch<JobHandle>("/detect-events", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
   plan: (req: {
     analysis_path: string;
     classified_path?: string;

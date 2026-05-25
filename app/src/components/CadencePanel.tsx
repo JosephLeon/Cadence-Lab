@@ -1,12 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api/client";
 import { useCadence, type PendingAction } from "../stores/cadence";
 import { useActiveProject } from "../stores/activeProject";
-import { useProject } from "../stores/project";
-import { useSplicing } from "../stores/splicing";
-import { digestProject } from "../lib/projectDigest";
-import { projectRelativePath } from "../lib/projectPaths";
 import { applyCadenceAction } from "../lib/applyCadenceAction";
+import { submitCadenceQuery } from "../lib/cadenceQuery";
 import { useAppView } from "../stores/appView";
 import { useSpliceNav } from "../stores/spliceNav";
 
@@ -26,17 +22,9 @@ export function CadencePanel() {
   const actions = useCadence((s) => s.actions);
   const busy = useCadence((s) => s.busy);
   const error = useCadence((s) => s.error);
-  const pushUserTurn = useCadence((s) => s.pushUserTurn);
-  const pushAssistantTurn = useCadence((s) => s.pushAssistantTurn);
-  const setBusy = useCadence((s) => s.setBusy);
-  const setError = useCadence((s) => s.setError);
   const reset = useCadence((s) => s.reset);
 
   const project = useActiveProject((s) => s.project);
-  const aiActiveMediaPath = useProject((s) => s.activeMediaPath);
-  const media = useProject((s) => s.media);
-  const spliceTimeline = useSplicing((s) => s.timeline);
-  const splicePlayhead = useSplicing((s) => s.playhead);
 
   const [input, setInput] = useState("");
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -67,38 +55,10 @@ export function CadencePanel() {
     const text = input.trim();
     if (!text || busy || !project) return;
     setInput("");
-    setError(null);
-    pushUserTurn(text);
-    setBusy(true);
     try {
-      const mediaByPath = Object.fromEntries(media.map((m) => [m.path, m]));
-      const activeSourceRel = aiActiveMediaPath
-        ? projectRelativePath(project, aiActiveMediaPath)
-        : null;
-      // Built fresh each turn so Cadence sees current state, not whatever
-      // it was at the start of the conversation.
-      const digest = digestProject(project, {
-        activeView: "ai",
-        aiActiveMediaPath,
-        mediaByPath,
-        spliceTimeline,
-        splicePlayhead,
-      });
-      // Send history of TEXT turns only — action proposals are managed
-      // client-side and don't belong in the prompt history.
-      const history = turns.map((t) => ({ role: t.role, text: t.text }));
-      const res = await api.cadenceQuery({
-        message: text,
-        history,
-        project_slug: project.slug,
-        active_source_rel: activeSourceRel,
-        digest_text: digest,
-      });
-      pushAssistantTurn(res.text, res.actions);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+      await submitCadenceQuery(text);
+    } catch {
+      // submitCadenceQuery already wrote the error to useCadence
     }
   };
 

@@ -17,6 +17,8 @@ export interface PipelineState {
   renderedPath?: string;
   /** Mic-only 16k WAV produced during ingest; used for per-cut audio clips. */
   micWavPath?: string;
+  /** Opt-in audio-event detection output (sniffles/throat clears/etc). */
+  eventsPath?: string;
 }
 
 /**
@@ -30,7 +32,13 @@ export type OverrideMap = Record<string, string>;
 
 /** Per-media job state. Only one stage at a time runs against a single clip. */
 export interface JobState {
-  stage: "analyze" | "classify" | "plan" | "render" | "render_audio";
+  stage:
+    | "analyze"
+    | "classify"
+    | "plan"
+    | "render"
+    | "render_audio"
+    | "detect_events";
   jobId?: string;       // undefined for sync stages (plan)
   progress: number;
   message: string;

@@ -72,6 +72,8 @@ from .classifier import classify as run_classify
 from .ingest import IngestError, ingest, probe
 from .models import (
     AnalysisBundle,
+    AudioEvent,
+    AudioEventBundle,
     Classification,
     ClassificationBundle,
     CutPlan,
@@ -83,6 +85,7 @@ from .paths import (
     analysis_path,
     cache_dir,
     classified_path,
+    events_path,
     mic_wav_path,
     output_dir,
     plan_path,
@@ -111,7 +114,7 @@ class Job:
     """One async pipeline run. Thread-safe via the GIL for our simple usage."""
 
     id: str
-    kind: Literal["analyze", "classify", "render", "splice"]
+    kind: Literal["analyze", "classify", "render", "splice", "detect_events"]
     status: JobStatus = "pending"
     progress: float = 0.0
     message: str = ""
@@ -148,7 +151,7 @@ _jobs: dict[str, Job] = {}
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cadence-job")
 
 
-def _new_job(kind: Literal["analyze", "classify", "render", "splice"]) -> Job:
+def _new_job(kind: Literal["analyze", "classify", "render", "splice", "detect_events"]) -> Job:
     job = Job(id=str(uuid.uuid4()), kind=kind)
     _jobs[job.id] = job
     return job
@@ -325,11 +328,13 @@ class CanonicalPaths(BaseModel):
     plan: str
     rendered: str
     mic_wav: str
+    events: str
     analysis_exists: bool
     classified_exists: bool
     plan_exists: bool
     rendered_exists: bool
     mic_wav_exists: bool
+    events_exists: bool
 
 
 class ProbeResponse(BaseModel):
@@ -353,17 +358,20 @@ def _canonical_paths(source: Path) -> CanonicalPaths:
     pp = plan_path(source)
     rp = rendered_path(source)
     mp = mic_wav_path(source)
+    ep = events_path(source)
     return CanonicalPaths(
         analysis=str(ap),
         classified=str(cp),
         plan=str(pp),
         rendered=str(rp),
         mic_wav=str(mp),
+        events=str(ep),
         analysis_exists=ap.exists(),
         classified_exists=cp.exists(),
         plan_exists=pp.exists(),
         rendered_exists=rp.exists(),
         mic_wav_exists=mp.exists(),
+        events_exists=ep.exists(),
     )
 
 
@@ -560,6 +568,91 @@ def classify_endpoint(req: ClassifyRequest) -> JobHandle:
 
     _executor.submit(run)
     return JobHandle(job_id=job.id)
+
+
+# ─── Audio-event detection (opt-in pipeline stage) ──────────────────────────
+
+
+class DetectEventsRequest(BaseModel):
+    """Run sniff/throat-clear/cough/etc detection on a source.
+
+    Separate from `/analyze` because it's slow (PANNs CNN14 SED runs at
+    roughly real-time on CPU) and most users never need it. Output is
+    cached to ``<source>.events.json`` so subsequent reads are free."""
+    source_path: str
+    mic_track: int | None = None  # currently unused (we read the mic WAV)
+
+
+@app.post("/detect-events", response_model=JobHandle)
+def detect_events_endpoint(req: DetectEventsRequest) -> JobHandle:
+    """Kick off the audio-event detection background job.
+
+    Requires the mic WAV to exist (which it will if Analyze has run).
+    If not, the job extracts the mic audio on the fly — same path as
+    `/audio-peaks`.
+    """
+    src = Path(req.source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+
+    job = _new_job("detect_events")
+
+    def run() -> None:
+        try:
+            job.status = "running"
+            cb = _progress_for(job)
+            cb(0.0, "Preparing audio…")
+            # Reuse the audio-peaks decoder so video sources auto-extract
+            # mic audio to the canonical cached path.
+            audio_input = _ensure_decodable_audio(src)
+            from .events import detect_events
+
+            events = detect_events(audio_input, progress=cb)
+
+            # Get duration from the WAV header for the bundle.
+            import soundfile as sf
+
+            with sf.SoundFile(str(audio_input)) as f:
+                duration = len(f) / float(f.samplerate)
+
+            bundle = AudioEventBundle(
+                events=events,
+                source_duration=duration,
+            )
+            out = events_path(src)
+            out.write_text(
+                json.dumps(bundle.model_dump(mode="json"), indent=2)
+            )
+            job.finish(
+                "done",
+                result={
+                    "events_path": str(out),
+                    "event_count": len(events),
+                },
+            )
+        except Exception as e:
+            job.finish("error", error=str(e))
+
+    _executor.submit(run)
+    return JobHandle(job_id=job.id)
+
+
+@app.get("/events", response_model=AudioEventBundle)
+def get_events(path: str = Query(..., description="Absolute path to source video")) -> AudioEventBundle:
+    """Return the cached audio-event detection output for a source.
+
+    Used by Cadence's `list_audio_events` tool to read the cached scan
+    result. 404 if the scan hasn't been run for this source yet — the
+    frontend can use that signal to surface the "Detect audio events"
+    button or for Cadence to propose running the scan.
+    """
+    src = Path(path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+    ep = events_path(src)
+    if not ep.exists():
+        raise HTTPException(404, f"no events file at {ep}")
+    return AudioEventBundle.model_validate_json(ep.read_text())
 
 
 SpeechEnhanceLevel = Literal["off", "low", "medium", "high"]

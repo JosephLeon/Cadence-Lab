@@ -21,7 +21,13 @@ import type { JobEvent, JobStatusResponse } from "../api/types";
  * around until the next run starts) so the UI can show them inline.
  */
 
-type Stage = "analyze" | "classify" | "plan" | "render" | "render_audio";
+type Stage =
+  | "analyze"
+  | "classify"
+  | "plan"
+  | "render"
+  | "render_audio"
+  | "detect_events";
 
 /**
  * Block on an async job: subscribe to its SSE event stream, mirror progress
@@ -146,6 +152,22 @@ export function usePipeline(mediaPath: string | null) {
           const after = latest();
           updateMedia(mediaPath, {
             pipeline: { ...after?.pipeline, planPath: res.plan_path },
+            job: null,
+          });
+        } else if (stage === "detect_events") {
+          // Opt-in: scans for non-speech sounds (sniffles, throat clears,
+          // coughs, etc.) so Cadence can offer "remove all sniffles"
+          // style cuts. Slow — runs as a background job with progress.
+          const handle = await api.detectEvents({ source_path: mediaPath });
+          updateMedia(mediaPath, {
+            job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
+          });
+          const job = await waitForJob(handle.job_id, setJobProgress);
+          const eventsPath = (job.result as { events_path: string } | null)
+            ?.events_path;
+          const after = latest();
+          updateMedia(mediaPath, {
+            pipeline: { ...after?.pipeline, eventsPath },
             job: null,
           });
         } else if (stage === "render" || stage === "render_audio") {

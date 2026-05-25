@@ -36,6 +36,8 @@ export interface CanonicalPaths {
   plan_exists: boolean;
   rendered_exists: boolean;
   mic_wav_exists: boolean;
+  events: string;
+  events_exists: boolean;
 }
 
 // ─── Projects (workspace) ──────────────────────────────────────────────────
@@ -134,6 +136,20 @@ export interface ProposedAction {
   type: string;
   summary: string;
   params: Record<string, unknown>;
+}
+
+export interface AudioEvent {
+  start: number;
+  end: number;
+  kind: string;
+  confidence: number;
+}
+
+export interface AudioEventBundle {
+  events: AudioEvent[];
+  source_duration: number;
+  model: string;
+  schema_version: number;
 }
 
 export interface CadenceQueryResponse {

@@ -192,6 +192,12 @@ def mic_wav_path(source: Path) -> Path:
     return artifacts_dir(source) / f"{source.stem}.mic.16k.wav"
 
 
+def events_path(source: Path) -> Path:
+    """Where the opt-in audio-event detection output (sniffles/throat
+    clears/etc) is cached for a given source."""
+    return artifacts_dir(source) / f"{source.stem}.events.json"
+
+
 # ─── Backward-compat: legacy flat-layout lookups ─────────────────────────────
 
 
