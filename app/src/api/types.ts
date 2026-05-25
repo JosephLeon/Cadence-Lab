@@ -115,6 +115,26 @@ export interface ProjectsListResponse {
   projects: ProjectSummary[];
 }
 
+// ─── Ask Cadence ──────────────────────────────────────────────────────────
+
+export interface CadenceTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface ProposedAction {
+  type: string;
+  summary: string;
+  params: Record<string, unknown>;
+}
+
+export interface CadenceQueryResponse {
+  text: string;
+  actions: ProposedAction[];
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export interface AudioPeaks {
   peaks: number[];
   duration: number;

@@ -888,6 +888,78 @@ def splice_render_endpoint(req: SpliceRequest) -> JobHandle:
     return JobHandle(job_id=job.id)
 
 
+# ─── Ask Cadence (natural-language editing) ─────────────────────────────────
+
+
+from . import cadence as _cadence_mod  # noqa: E402
+
+
+class CadenceTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class CadenceQueryRequest(BaseModel):
+    message: str
+    history: list[CadenceTurn] = []
+    project_slug: str
+    active_source_rel: str | None = None
+    digest_text: str  # frontend builds the digest (it has session state)
+
+
+class ProposedActionResponse(BaseModel):
+    type: str
+    summary: str
+    params: dict[str, Any]
+
+
+class CadenceQueryResponse(BaseModel):
+    text: str
+    actions: list[ProposedActionResponse]
+    input_tokens: int
+    output_tokens: int
+
+
+@app.post("/cadence/query", response_model=CadenceQueryResponse)
+def cadence_query(req: CadenceQueryRequest) -> CadenceQueryResponse:
+    """Single turn of the Ask Cadence conversation.
+
+    Loads the project, hands off to ``cadence.query`` which runs Claude
+    with the tool-use loop, and returns the assistant's text plus any
+    proposed actions the user can apply via the frontend dispatcher.
+    """
+    try:
+        project = _projects_mod.load_project(req.project_slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+
+    history = [
+        _cadence_mod.CadenceMessage(role=t.role, text=t.text)
+        for t in req.history
+    ]
+    try:
+        resp = _cadence_mod.query(
+            message=req.message,
+            history=history,
+            project=project,
+            active_source_rel=req.active_source_rel,
+            digest_text=req.digest_text,
+        )
+    except RuntimeError as e:
+        # Missing API key, etc — surface as 503.
+        raise HTTPException(503, str(e))
+
+    return CadenceQueryResponse(
+        text=resp.text,
+        actions=[
+            ProposedActionResponse(type=a.type, summary=a.summary, params=a.params)
+            for a in resp.actions
+        ],
+        input_tokens=resp.input_tokens,
+        output_tokens=resp.output_tokens,
+    )
+
+
 # ─── Job introspection ───────────────────────────────────────────────────────
 
 

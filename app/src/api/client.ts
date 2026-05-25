@@ -3,6 +3,8 @@
 
 import type {
   AudioPeaks,
+  CadenceQueryResponse,
+  CadenceTurn,
   JobEvent,
   JobHandle,
   JobStatusResponse,
@@ -81,6 +83,21 @@ export const api = {
       `/projects/${encodeURIComponent(slug)}`,
       { method: "DELETE" },
     ),
+
+  /** Single turn of the Ask Cadence conversation. The frontend builds the
+   *  digest (it has live session state); the backend feeds it into Claude's
+   *  system prompt along with the user message + history. */
+  cadenceQuery: (req: {
+    message: string;
+    history: CadenceTurn[];
+    project_slug: string;
+    active_source_rel: string | null;
+    digest_text: string;
+  }) =>
+    jsonFetch<CadenceQueryResponse>("/cadence/query", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
 
   probe: (source_path: string) =>
     jsonFetch<ProbeResponse>("/probe", {

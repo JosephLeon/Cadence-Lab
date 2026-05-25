@@ -1,0 +1,550 @@
+"""Ask Cadence — natural-language editing of the active project.
+
+Claude reads project state via a small set of **read tools** (transcript,
+pauses, fillers, classification) and proposes edits via **action tools**.
+Action tools don't execute server-side; they're recorded and returned to
+the frontend, which renders them as proposal cards the user explicitly
+applies.
+
+This split keeps the user in control: read tools are "free" introspection,
+action tools require a click. The same Claude call can do both — gather
+context with read tools first, then propose edits.
+
+Phase 1 scope: pacing/audio edits on a single active source. Multi-source
+operations and splice-timeline edits come later.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal
+
+import anthropic
+
+from .models import AnalysisBundle, ClassificationBundle
+from .projects import Project, project_dir_path, resolve_source
+
+
+CADENCE_MODEL = "claude-opus-4-7"
+
+SYSTEM_PROMPT = """You are Cadence, the AI editor inside Cadence Lab.
+You help a YouTuber edit their videos by proposing concrete edits to the
+active project. Each turn you receive:
+
+- A short project digest (sources, renders, active source, pipeline state).
+- The user's request in natural language.
+
+Your job is to figure out **what specific edits to propose** to fulfill the
+request, then call the appropriate tools.
+
+You have two kinds of tools:
+
+- **Read tools** (list_pauses, list_fillers, get_transcript_around,
+  get_classification): these fetch project state so you can locate the
+  thing the user mentioned ("the um at 1:23", "the long pause around
+  5:00"). Use them freely — they cost nothing.
+
+- **Propose tools** (propose_*): these don't apply edits directly. They
+  *record* a proposed edit. The user reviews and applies them in the UI.
+  Be specific in the `summary` field — that's the only thing the user
+  sees before clicking Apply.
+
+Guidelines:
+
+1. **Be precise.** If the user says "remove the um at 1:23", use
+   `list_fillers` to find the filler closest to that timestamp, then
+   propose the exact override. Don't propose vague "remove some fillers."
+
+2. **Don't ask, propose.** The user explicitly invoked you to make
+   changes. Propose the edit; the user will reject it if wrong. Asking
+   "should I cut this?" wastes a turn — propose it and explain in the
+   summary.
+
+3. **Chain proposals when needed.** If the user says "remove all ums",
+   list the fillers, then call `propose_set_override` once per um.
+
+4. **When you finish proposing, end with a short text confirmation** —
+   what you proposed and why. The proposed actions show up automatically
+   in the UI; your text is just human-readable context.
+
+5. **Refuse cleanly** if the request can't be fulfilled with available
+   tools (e.g. "find clips where the speaker is laughing" — that's
+   computer-vision territory, which we don't have yet). Explain why
+   briefly and suggest what they could do instead.
+"""
+
+
+# ─── Tool schemas ────────────────────────────────────────────────────────────
+
+READ_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "list_pauses",
+        "description": (
+            "List silent pauses detected in the active source. Use this to "
+            "locate pauses by approximate timestamp before proposing a "
+            "cut/trim override."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "min_seconds": {
+                    "type": "number",
+                    "description": "Minimum pause duration to include (default 0.5).",
+                },
+                "near_time": {
+                    "type": "number",
+                    "description": (
+                        "Optional: only return pauses within ±5s of this "
+                        "timestamp (seconds into the source)."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "list_fillers",
+        "description": (
+            "List filler-word candidates (ums, uhs, you-knows) detected by "
+            "Whisper. Use this to find a specific filler the user wants to "
+            "remove."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text_contains": {
+                    "type": "string",
+                    "description": (
+                        "Filter to fillers whose text matches (case-insensitive "
+                        "substring). E.g. 'um' matches 'um' and 'ums'."
+                    ),
+                },
+                "near_time": {
+                    "type": "number",
+                    "description": (
+                        "Optional: only return fillers within ±3s of this "
+                        "timestamp."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "get_transcript_around",
+        "description": (
+            "Return the spoken words around a given timestamp. Useful for "
+            "context when the user references content rather than time."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "time": {
+                    "type": "number",
+                    "description": "Center timestamp in seconds.",
+                },
+                "window_seconds": {
+                    "type": "number",
+                    "description": "Half-window size; default 5.",
+                },
+            },
+            "required": ["time"],
+        },
+    },
+    {
+        "name": "get_classification_summary",
+        "description": (
+            "Return counts of pauses, fillers, retakes, and current "
+            "classifier actions. Cheap overview to orient yourself."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+ACTION_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "propose_set_override",
+        "description": (
+            "Propose an override for a single pause or filler. Keys look "
+            "like 'pause:5' or 'filler:12' — get them from list_pauses or "
+            "list_fillers. Valid values: 'cut' (remove entirely), 'trim' "
+            "(replace with default breath, pauses only), 'keep' (revert "
+            "classifier default), 'reject' (retakes only)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Override key from list_pauses/list_fillers, e.g. 'filler:3'.",
+                },
+                "value": {
+                    "type": "string",
+                    "enum": ["cut", "trim", "keep", "reject"],
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "One-line human-readable description shown to the "
+                        "user before they apply. Include the timestamp and "
+                        "what's being changed."
+                    ),
+                },
+            },
+            "required": ["key", "value", "summary"],
+        },
+    },
+    {
+        "name": "propose_set_audio_setting",
+        "description": (
+            "Propose changing an audio enhancement setting on the active "
+            "source. Settings: enhance_speech (off/low/medium/high), "
+            "auto_duck (true/false), ducking_db (-24 to -2)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "setting": {
+                    "type": "string",
+                    "enum": ["enhance_speech", "auto_duck", "ducking_db"],
+                },
+                "value": {
+                    "description": (
+                        "New value. String for enhance_speech, bool for "
+                        "auto_duck, number for ducking_db."
+                    ),
+                },
+                "summary": {"type": "string"},
+            },
+            "required": ["setting", "value", "summary"],
+        },
+    },
+]
+
+ALL_TOOLS = READ_TOOLS + ACTION_TOOLS
+
+
+# ─── Request / response types ────────────────────────────────────────────────
+
+
+@dataclass
+class CadenceMessage:
+    """One turn of conversation. Role is `user` or `assistant`."""
+    role: Literal["user", "assistant"]
+    text: str
+
+
+@dataclass
+class ProposedAction:
+    """An action Cadence wants the user to apply. Frontend renders these as
+    cards and maps them to store actions."""
+    type: str
+    summary: str
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class CadenceResponse:
+    """One assistant turn: text plus any actions it proposed."""
+    text: str
+    actions: list[ProposedAction] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+# ─── Read-tool dispatch (executes server-side) ───────────────────────────────
+
+
+@dataclass
+class CadenceContext:
+    """The slice of project state Cadence's read tools operate on."""
+    project: Project
+    active_source_rel: str | None  # project-relative path of AI-active source
+
+    def active_source_abs(self) -> Path | None:
+        if not self.active_source_rel:
+            return None
+        # Find the SourceEntry to resolve via ref_mode
+        for s in self.project.sources:
+            if s.path == self.active_source_rel:
+                return resolve_source(self.project, s)
+        # Fallback: treat as project-relative
+        return project_dir_path(self.project.slug) / self.active_source_rel
+
+
+def _load_analysis(ctx: CadenceContext) -> AnalysisBundle | None:
+    abs_src = ctx.active_source_abs()
+    if not abs_src:
+        return None
+    from .paths import analysis_path
+
+    ap = analysis_path(abs_src)
+    if not ap.exists():
+        return None
+    return AnalysisBundle.model_validate_json(ap.read_text())
+
+
+def _load_classification(ctx: CadenceContext) -> ClassificationBundle | None:
+    abs_src = ctx.active_source_abs()
+    if not abs_src:
+        return None
+    from .paths import classified_path
+
+    cp = classified_path(abs_src)
+    if not cp.exists():
+        return None
+    return ClassificationBundle.model_validate_json(cp.read_text())
+
+
+def _dispatch_read_tool(
+    name: str, args: dict[str, Any], ctx: CadenceContext
+) -> dict[str, Any] | str:
+    """Execute a read tool and return a JSON-serializable result. String
+    return = error message Claude will see as the tool_result."""
+    bundle = _load_classification(ctx)
+    if bundle is None and name in ("list_pauses", "list_fillers", "get_classification_summary"):
+        return (
+            "No classification available for the active source. The user "
+            "must run the pipeline (Analyze → Classify → Plan) first."
+        )
+
+    if name == "list_pauses":
+        if bundle is None:
+            return "no classification"
+        min_s = float(args.get("min_seconds") or 0.5)
+        near = args.get("near_time")
+        out: list[dict[str, Any]] = []
+        # Map pause_candidates against the classification action for each.
+        actions_by_id = {p.id: p for p in bundle.classification.pauses}
+        for p in bundle.pause_candidates:
+            dur = p.end - p.start
+            if dur < min_s:
+                continue
+            if near is not None and abs(p.start - near) > 5 and abs(p.end - near) > 5:
+                continue
+            act = actions_by_id.get(p.id)
+            out.append({
+                "id": p.id,
+                "key": f"pause:{p.id}",
+                "start": round(p.start, 2),
+                "end": round(p.end, 2),
+                "duration": round(dur, 2),
+                "classifier_action": act.action if act else "keep",
+                "classifier_reason": act.reason if act else "",
+            })
+        return {"pauses": out}
+
+    if name == "list_fillers":
+        if bundle is None:
+            return "no classification"
+        substr = (args.get("text_contains") or "").lower()
+        near = args.get("near_time")
+        out_f: list[dict[str, Any]] = []
+        actions_by_id = {f.id: f for f in bundle.classification.fillers}
+        for f in bundle.filler_candidates:
+            if substr and substr not in f.text.lower():
+                continue
+            if near is not None and abs(f.start - near) > 3 and abs(f.end - near) > 3:
+                continue
+            act = actions_by_id.get(f.id)
+            out_f.append({
+                "id": f.id,
+                "key": f"filler:{f.id}",
+                "text": f.text,
+                "start": round(f.start, 2),
+                "end": round(f.end, 2),
+                "classifier_action": act.action if act else "keep",
+                "classifier_reason": act.reason if act else "",
+            })
+        return {"fillers": out_f}
+
+    if name == "get_transcript_around":
+        analysis = _load_analysis(ctx)
+        if analysis is None:
+            return "no analysis available for the active source"
+        t = float(args.get("time", 0.0))
+        win = float(args.get("window_seconds") or 5.0)
+        words = []
+        for seg in analysis.speech.segments:
+            for w in seg.words:
+                if w.end >= t - win and w.start <= t + win:
+                    words.append({
+                        "text": w.text,
+                        "start": round(w.start, 2),
+                        "end": round(w.end, 2),
+                    })
+        return {"window_start": t - win, "window_end": t + win, "words": words}
+
+    if name == "get_classification_summary":
+        if bundle is None:
+            return "no classification"
+        c = bundle.classification
+        return {
+            "pause_count": len(bundle.pause_candidates),
+            "filler_count": len(bundle.filler_candidates),
+            "retake_count": len(c.retakes),
+            "pause_actions": {
+                "cut": sum(1 for p in c.pauses if p.action == "cut"),
+                "trim": sum(1 for p in c.pauses if p.action == "trim"),
+                "keep": sum(1 for p in c.pauses if p.action == "keep"),
+            },
+            "filler_actions": {
+                "cut": sum(1 for f in c.fillers if f.action == "cut"),
+                "keep": sum(1 for f in c.fillers if f.action == "keep"),
+            },
+        }
+
+    return f"unknown read tool: {name}"
+
+
+# ─── Top-level query ─────────────────────────────────────────────────────────
+
+
+def query(
+    *,
+    message: str,
+    history: list[CadenceMessage],
+    project: Project,
+    active_source_rel: str | None,
+    digest_text: str,
+    api_key: str | None = None,
+    max_iterations: int = 8,
+) -> CadenceResponse:
+    """Run one turn of the Cadence conversation.
+
+    Loops on tool use until Claude responds with text only (or we hit the
+    iteration cap). Read tools execute server-side and their results are
+    fed back to Claude. Action tools are recorded as `ProposedAction`s and
+    acked back to Claude so it knows the proposal was accepted.
+    """
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+    client = anthropic.Anthropic(api_key=key)
+    ctx = CadenceContext(project=project, active_source_rel=active_source_rel)
+    actions: list[ProposedAction] = []
+
+    # Build the conversation: prior turns + new user message. We never send
+    # action proposals back as part of history (they're handled client-side);
+    # only the text content of each turn is preserved.
+    messages: list[dict[str, Any]] = []
+    for h in history:
+        messages.append({"role": h.role, "content": h.text})
+    messages.append({"role": "user", "content": message})
+
+    system_blocks = [
+        {
+            "type": "text",
+            "text": SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        },
+        {
+            "type": "text",
+            "text": f"<project_digest>\n{digest_text}\n</project_digest>",
+        },
+    ]
+
+    total_in = 0
+    total_out = 0
+    final_text = ""
+
+    for _ in range(max_iterations):
+        resp = client.messages.create(
+            model=CADENCE_MODEL,
+            max_tokens=4096,
+            system=system_blocks,
+            tools=ALL_TOOLS,
+            messages=messages,
+        )
+        total_in += getattr(resp.usage, "input_tokens", 0) or 0
+        total_out += getattr(resp.usage, "output_tokens", 0) or 0
+
+        # Collect text + tool_use blocks. We append the assistant turn
+        # verbatim to messages so the next iteration can reference it.
+        assistant_content: list[dict[str, Any]] = []
+        tool_uses: list[Any] = []
+        text_parts: list[str] = []
+        for block in resp.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+                assistant_content.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                tool_uses.append(block)
+                assistant_content.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        if resp.stop_reason != "tool_use" or not tool_uses:
+            final_text = "\n".join(text_parts).strip()
+            break
+
+        # Execute / record each tool call and feed results back.
+        tool_results: list[dict[str, Any]] = []
+        for tu in tool_uses:
+            name = tu.name
+            args = tu.input or {}
+            if name.startswith("propose_"):
+                # Record the proposed action; return a tiny ack so Claude
+                # knows it landed.
+                actions.append(_make_proposed_action(name, args))
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": json.dumps({"recorded": True, "index": len(actions) - 1}),
+                })
+            else:
+                result = _dispatch_read_tool(name, args, ctx)
+                if isinstance(result, str):
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "is_error": True,
+                        "content": result,
+                    })
+                else:
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": json.dumps(result),
+                    })
+        messages.append({"role": "user", "content": tool_results})
+
+    return CadenceResponse(
+        text=final_text or "(no response)",
+        actions=actions,
+        input_tokens=total_in,
+        output_tokens=total_out,
+    )
+
+
+def _make_proposed_action(name: str, args: dict[str, Any]) -> ProposedAction:
+    """Translate a `propose_<X>` tool call into a structured ProposedAction
+    the frontend can apply via its action dispatcher."""
+    summary = args.get("summary", name)
+    if name == "propose_set_override":
+        return ProposedAction(
+            type="set_override",
+            summary=summary,
+            params={
+                "key": args.get("key"),
+                "value": args.get("value"),
+            },
+        )
+    if name == "propose_set_audio_setting":
+        return ProposedAction(
+            type="set_audio_setting",
+            summary=summary,
+            params={
+                "setting": args.get("setting"),
+                "value": args.get("value"),
+            },
+        )
+    # Unknown propose_ tool — surface as opaque so the user can at least see
+    # what Claude tried to do.
+    return ProposedAction(type=name, summary=summary, params=dict(args))

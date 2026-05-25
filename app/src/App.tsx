@@ -7,6 +7,7 @@ import { Timeline } from "./components/Timeline";
 import { ReviewPanel } from "./components/ReviewPanel";
 import { SplicingView } from "./components/SplicingView";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { CadencePanel } from "./components/CadencePanel";
 import { api } from "./api/client";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useActiveProject } from "./stores/activeProject";
@@ -110,6 +111,9 @@ export default function App() {
       ) : (
         <SplicingView />
       )}
+      {/* Ask Cadence overlay — renders on top of whichever view is active
+          when the user opens it from the TopBar. Self-gates on project. */}
+      {project && <CadencePanel />}
     </div>
   );
 }

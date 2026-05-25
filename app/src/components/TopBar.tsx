@@ -1,5 +1,6 @@
 import { ProjectSwitcher } from "./ProjectSwitcher";
 import { useActiveProject } from "../stores/activeProject";
+import { useCadence } from "../stores/cadence";
 
 export type AppView = "ai" | "splicing";
 
@@ -11,6 +12,7 @@ interface Props {
 
 export function TopBar({ serverOk, view, onViewChange }: Props) {
   const hasProject = useActiveProject((s) => s.project !== null);
+  const openCadence = useCadence((s) => s.setOpen);
   // Only surface the server indicator when it's actually informative —
   // i.e. while we're still connecting on first launch, or after the
   // sidecar dies. The healthy state is the 99% case and just adds noise.
@@ -39,13 +41,21 @@ export function TopBar({ serverOk, view, onViewChange }: Props) {
 
       <div className="flex-1" />
 
-      {/* Command bar placeholder — text-based conversational editing */}
-      <input
-        type="text"
-        placeholder="Ask Cadence (e.g. ‘trim silence at 0:30’)"
-        className="h-8 w-96 max-w-full rounded-md border border-border bg-bg px-3 text-sm placeholder:text-text-muted focus:outline-none focus:border-accent transition-colors"
-        disabled
-      />
+      {/* Ask Cadence trigger — only meaningful inside a project. Looks
+          like an input but actually opens the chat panel where the
+          conversation happens. Click or focus to open. */}
+      {hasProject && (
+        <button
+          onClick={() => openCadence(true)}
+          className="h-8 w-96 max-w-full rounded-md border border-border bg-bg px-3 text-sm text-left text-text-muted hover:border-accent hover:text-text-secondary transition-colors flex items-center gap-2"
+          title="Open Ask Cadence (natural-language editing)"
+        >
+          <span className="text-text-muted">✨</span>
+          <span className="truncate">
+            Ask Cadence — e.g. "Remove the um at 1:23"
+          </span>
+        </button>
+      )}
 
       {showServerStatus && (
         <div className="flex items-center gap-2 text-xs">
