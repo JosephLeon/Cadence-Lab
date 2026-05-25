@@ -26,19 +26,29 @@ export function ProjectSwitcher() {
   const ref = useRef<HTMLDivElement | null>(null);
   const qc = useQueryClient();
 
+  // Always fetch on mount. Retry aggressively on network errors — on
+  // initial app launch the frontend bundle can load before the Python
+  // sidecar finishes booting, in which case the first /projects fetch
+  // proxies to a refused connection. Without retry the query sits stuck
+  // in error forever (the user sees "no recent projects" even though
+  // they have some) until a hard refresh.
   const projectsQuery = useQuery({
     queryKey: ["projects-list"],
     queryFn: () => api.listProjects(),
-    enabled: popoverOpen,
+    staleTime: 0,
+    refetchOnMount: "always",
+    retry: 10,
+    retryDelay: (attempt) => Math.min(2000, 200 * 2 ** attempt),
   });
 
-  // Refresh the list each time the popover opens — the user may have
-  // created/deleted projects in another window or via the welcome screen.
+  // Force a fresh fetch whenever the popover opens. `invalidate` alone
+  // marks the cache stale but doesn't retry past errors; `refetch()`
+  // fires a new request unconditionally — what we actually want here.
   useEffect(() => {
     if (popoverOpen) {
-      void qc.invalidateQueries({ queryKey: ["projects-list"] });
+      void projectsQuery.refetch();
     }
-  }, [popoverOpen, qc]);
+  }, [popoverOpen]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Outside-click to close.
   useEffect(() => {

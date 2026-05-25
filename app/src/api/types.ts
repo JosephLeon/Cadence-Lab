@@ -71,6 +71,7 @@ export interface ProjectSpliceClip {
   source_start: number;
   source_end: number;
   duration: number;
+  title?: string | null;
 }
 
 export interface ProjectSpliceState {

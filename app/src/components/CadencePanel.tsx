@@ -7,6 +7,8 @@ import { useSplicing } from "../stores/splicing";
 import { digestProject } from "../lib/projectDigest";
 import { projectRelativePath } from "../lib/projectPaths";
 import { applyCadenceAction } from "../lib/applyCadenceAction";
+import { useAppView } from "../stores/appView";
+import { useSpliceNav } from "../stores/spliceNav";
 
 /**
  * Slide-in chat panel for Ask Cadence. Opens from the right edge of the
@@ -267,6 +269,9 @@ function TurnView({
 
 function ActionCard({ pending }: { pending: PendingAction }) {
   const markStatus = useCadence((s) => s.markActionStatus);
+  const setAppView = useAppView((s) => s.setView);
+  const closeCadence = useCadence((s) => s.setOpen);
+  const scrollSpliceToEnd = useSpliceNav((s) => s.requestScrollToEnd);
 
   const apply = () => {
     try {
@@ -280,6 +285,11 @@ function ActionCard({ pending }: { pending: PendingAction }) {
       );
     }
   };
+
+  // Highlight clips land in the splice timeline, not the AI tab — surface
+  // a one-tap link so the user doesn't have to know where to look.
+  const showSpliceLink =
+    pending.status === "applied" && pending.action.type === "add_splice_clip";
 
   return (
     <div
@@ -325,9 +335,25 @@ function ActionCard({ pending }: { pending: PendingAction }) {
           </div>
         )}
         {pending.status === "applied" && (
-          <span className="text-[10px] text-emerald-400 shrink-0">
-            ✓ Applied
-          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[10px] text-emerald-400">✓ Applied</span>
+            {showSpliceLink && (
+              <button
+                onClick={() => {
+                  setAppView("splicing");
+                  closeCadence(false);
+                  // Scroll the splice timeline to the end so the user
+                  // lands looking at the clip they just applied rather
+                  // than at the start of a long timeline.
+                  scrollSpliceToEnd();
+                }}
+                className="text-[10px] text-accent hover:underline"
+                title="Switch to the Splicing tab to see the clip"
+              >
+                Open in Splicing →
+              </button>
+            )}
+          </div>
         )}
         {pending.status === "dismissed" && (
           <span className="text-[10px] text-text-muted shrink-0">

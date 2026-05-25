@@ -1,6 +1,7 @@
 import type { ProposedAction } from "../api/types";
 import { useProject } from "../stores/project";
 import type { SpeechEnhanceLevel } from "../stores/project";
+import { useSplicing } from "../stores/splicing";
 
 /**
  * Apply a Cadence-proposed action to the running app state.
@@ -33,6 +34,41 @@ export function applyCadenceAction(action: ProposedAction): void {
       );
       const key = stringParam(params, "key");
       useProject.getState().setOverride(sourcePath, key, null);
+      return;
+    }
+
+    case "add_splice_clip": {
+      // A highlight clip: a sub-range of the active source dropped into
+      // the splice timeline. Pull source path + total duration from
+      // useProject (the AI tab's active item), not useSplicing — the
+      // user is in the AI tab when Cadence is invoked.
+      const sourcePath = activeMediaPathOrThrow(
+        "add_splice_clip needs an active source",
+      );
+      const start = numberParam(params, "start");
+      const end = numberParam(params, "end");
+      if (!(end > start)) {
+        throw new Error(
+          `end (${end}) must be strictly greater than start (${start})`,
+        );
+      }
+      const item = useProject
+        .getState()
+        .media.find((m) => m.path === sourcePath);
+      const sourceDuration = item?.probe?.duration_seconds;
+      if (!sourceDuration || !Number.isFinite(sourceDuration)) {
+        throw new Error(
+          "source duration unknown — can't add to splice timeline " +
+            "(is the probe complete?)",
+        );
+      }
+      const title =
+        typeof params.title === "string" && params.title.trim()
+          ? params.title.trim()
+          : undefined;
+      useSplicing
+        .getState()
+        .addClipRange(sourcePath, start, end, sourceDuration, { title });
       return;
     }
 

@@ -39,6 +39,11 @@ export type SpliceClip =
       sourceStart: number;
       sourceEnd: number;
       sourceDuration: number;
+      /** Optional human-readable label (e.g. Cadence's highlight title).
+       *  Shown in the timeline header instead of the bare filename when
+       *  present — distinguishes "Add highlight: Iran/Fed/data centers"
+       *  from a generic full-source clip of the same file. */
+      title?: string;
     }
   | {
       kind: "blank";
@@ -64,6 +69,16 @@ interface SplicingState {
   removeMedia: (path: string) => void;
 
   addClip: (sourcePath: string, sourceDuration: number, atIndex?: number) => void;
+  /** Add a clip covering a specific sub-range of a source. Used by
+   *  Cadence's highlight extraction — the proposed clip is a slice of
+   *  the source, not the whole thing. */
+  addClipRange: (
+    sourcePath: string,
+    sourceStart: number,
+    sourceEnd: number,
+    sourceDuration: number,
+    opts?: { atIndex?: number; title?: string },
+  ) => void;
   /** Insert a blank black span at the given timeline index. */
   addBlank: (duration: number, atIndex: number) => void;
   removeClip: (id: string) => void;
@@ -130,6 +145,7 @@ function clipToManifest(
       source_start: clip.sourceStart,
       source_end: clip.sourceEnd,
       duration: 0,
+      title: clip.title ?? null,
     };
   }
   return {
@@ -156,6 +172,7 @@ export function manifestToClip(
       sourceStart: entry.source_start,
       sourceEnd: entry.source_end,
       sourceDuration: resolveSourceDuration(abs),
+      title: entry.title ?? undefined,
     };
   }
   return {
@@ -225,6 +242,29 @@ export const useSplicing = create<SplicingState>((set, get) => ({
         sourceEnd: sourceDuration,
         sourceDuration,
       };
+      if (atIndex === undefined || atIndex >= s.timeline.length) {
+        return { timeline: [...s.timeline, clip] };
+      }
+      const next = [...s.timeline];
+      next.splice(Math.max(0, atIndex), 0, clip);
+      return { timeline: next };
+    });
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
+
+  addClipRange: (sourcePath, sourceStart, sourceEnd, sourceDuration, opts) => {
+    set((s) => {
+      const clip: SpliceClip = {
+        kind: "video",
+        id: nextId(),
+        sourcePath,
+        sourceStart: Math.max(0, sourceStart),
+        sourceEnd: Math.min(sourceDuration, sourceEnd),
+        sourceDuration,
+        title: opts?.title,
+      };
+      const atIndex = opts?.atIndex;
       if (atIndex === undefined || atIndex >= s.timeline.length) {
         return { timeline: [...s.timeline, clip] };
       }

@@ -77,6 +77,22 @@ export const api = {
       },
     ),
 
+  /** Remove a source from the project's manifest. Returns the updated
+   *  manifest. ``path`` is the manifest's ``sources[i].path`` value, not
+   *  the absolute filesystem path. */
+  removeSource: (
+    slug: string,
+    path: string,
+    opts: { deleteFile?: boolean } = {},
+  ) => {
+    const params = new URLSearchParams({ path });
+    if (opts.deleteFile) params.set("delete_file", "true");
+    return jsonFetch<Project>(
+      `/projects/${encodeURIComponent(slug)}/sources?${params.toString()}`,
+      { method: "DELETE" },
+    );
+  },
+
   /** Irreversibly delete a project (directory + manifest + all artifacts/renders). */
   deleteProject: (slug: string) =>
     jsonFetch<{ status: string; slug: string }>(

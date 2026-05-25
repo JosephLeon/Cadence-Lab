@@ -269,6 +269,30 @@ def delete_project_endpoint(slug: str) -> dict[str, str]:
     return {"status": "deleted", "slug": slug}
 
 
+@app.delete("/projects/{slug}/sources")
+def remove_source_endpoint(
+    slug: str,
+    path: str = Query(..., description="The source's `path` field as stored in the manifest"),
+    delete_file: bool = Query(False, description="If True and the source was copied, also unlink the file under sources/"),
+) -> _projects_mod.Project:
+    """Remove a source from a project. Returns the updated manifest so the
+    frontend can sync state in one round trip — same pattern as the add
+    endpoint."""
+    try:
+        project = _projects_mod.load_project(slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+    removed = _projects_mod.remove_source(
+        project, path, delete_copied_file=delete_file
+    )
+    if not removed:
+        raise HTTPException(
+            404, f"no source with path={path!r} in project {slug}"
+        )
+    _projects_mod.save_project(project)
+    return project
+
+
 @app.post("/projects/{slug}/sources")
 def add_source_endpoint(
     slug: str, req: AddSourceRequest

@@ -4,6 +4,8 @@ import { useActiveProject } from "../stores/activeProject";
 import { absoluteSourcePath } from "../lib/projectPaths";
 import type { MediaItem } from "../stores/project";
 import { MediaAddPanel } from "./MediaAddPanel";
+import { api } from "../api/client";
+import type { Project } from "../api/types";
 
 function fmtDuration(s: number): string {
   const m = Math.floor(s / 60);
@@ -26,6 +28,38 @@ export function MediaBrowser() {
   const project = useActiveProject((s) => s.project);
 
   const [dragOver, setDragOver] = useState(false);
+
+  /**
+   * Remove a media row. For sources tracked in the active project's
+   * manifest, this goes through the backend `DELETE /projects/<slug>/sources`
+   * endpoint so the manifest stays consistent (the in-memory removal alone
+   * would be undone on the next source-sync). For non-project items
+   * (renders or ad-hoc adds), it's just an in-memory removal.
+   */
+  const removeRow = async (absPath: string) => {
+    const sourceEntry = project?.sources.find(
+      (s) => absoluteSourcePath(project, s) === absPath,
+    );
+    if (project && sourceEntry) {
+      try {
+        const updated: Project = await api.removeSource(
+          project.slug,
+          sourceEntry.path,
+        );
+        useActiveProject.setState({
+          project: { ...updated, path: project.path },
+        });
+        // Sync hook will reconcile useProject.media on the project update.
+      } catch (e) {
+        // Fall back to in-memory removal so the user still gets the
+        // immediate UI feedback they expect.
+        console.error("[MediaBrowser] removeSource failed:", e);
+        removeMedia(absPath);
+      }
+    } else {
+      removeMedia(absPath);
+    }
+  };
 
   // Partition the media list into Sources vs Renders based on the active
   // project's manifest. Sources are the user-added videos; renders are
@@ -104,7 +138,7 @@ export function MediaBrowser() {
               items={sourceItems}
               active={active}
               onSelect={setActive}
-              onRemove={removeMedia}
+              onRemove={(p) => void removeRow(p)}
             />
             {renderItems.length > 0 && (
               <MediaGroup
@@ -112,7 +146,7 @@ export function MediaBrowser() {
                 items={renderItems}
                 active={active}
                 onSelect={setActive}
-                onRemove={removeMedia}
+                onRemove={(p) => void removeRow(p)}
                 labelByPath={renderLabelByPath}
               />
             )}

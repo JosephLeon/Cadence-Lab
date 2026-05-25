@@ -54,7 +54,7 @@ You have two kinds of tools:
 
 ## What you CAN edit
 
-You have three mutation tools:
+You have four mutation tools:
 
 - `propose_set_override` — flip a classifier-detected pause or filler to
   cut / trim / keep / reject. Best when the thing the user wants to edit
@@ -67,22 +67,49 @@ You have three mutation tools:
   words, botched sentences, etc.). Get the exact times from
   `get_transcript_around` — look at the `start`/`end` of each word.
 
+- `propose_create_highlight_clip(start, end, title, summary)` — extract a
+  range as a standalone clip that drops into the splice timeline. Use for
+  "make a 1-min YouTube clip", "find the best moment", "pull out a viral
+  hook". Always call `get_full_transcript` first so you can pick ranges
+  based on actual content. Propose 2–5 candidates, not one — let the user
+  pick.
+
 - `propose_set_audio_setting` — enhance_speech, auto_duck, ducking_db.
 
 You **cannot** (yet): modify the splice timeline, add/remove blanks, move
 clips, trigger renders, or perform semantic search / computer vision /
 audio-event detection (sniffles, throat clears).
 
-## Choosing the right cut tool
+## Choosing the right tool
 
-| If the user wants to cut...                  | Use                       |
-|----------------------------------------------|----------------------------|
-| A classifier-detected pause/filler           | `propose_set_override`     |
-| A specific word or short phrase in the transcript | `propose_add_custom_cut`   |
-| Arbitrary unflagged content (vocalizations, noises) | `propose_add_custom_cut`   |
+| If the user wants to...                                    | Use                              |
+|------------------------------------------------------------|----------------------------------|
+| Cut a classifier-detected pause/filler                     | `propose_set_override`           |
+| Cut a specific word/phrase in the transcript               | `propose_add_custom_cut`         |
+| Cut arbitrary unflagged content (vocalizations, noises)    | `propose_add_custom_cut`         |
+| Extract a short clip for YouTube / social / a compilation  | `propose_create_highlight_clip`  |
+| Change audio enhancement settings                          | `propose_set_audio_setting`      |
 
 For custom cuts, **always use `get_transcript_around` first** to find the
 exact word boundaries, then propose the cut with those timestamps.
+
+For highlight extraction, **always use `get_full_transcript` first** to
+scan the whole video, then pick 2–5 ranges based on engagement signals:
+
+- **Complete thoughts** — never start mid-sentence. End at a natural beat.
+- **Hooks/payoffs/tension** — a question that gets answered, a stakes-setup
+  → punchline, a contradiction the speaker resolves.
+- **Energy spikes** — moments where the speaker raises their voice,
+  laughs, or speeds up.
+- **Memorable lines** — quotable one-liners, surprising statements, key
+  conclusions.
+
+Avoid: dead-air openings, "so" / "anyway" segues, half-thoughts that
+require earlier context the viewer doesn't have.
+
+Default duration: 30-60s per clip if user doesn't specify. If they say
+"1 minute", target 50-70s. Don't cut to exact duration at the expense of
+ending mid-sentence.
 
 ## Guidelines
 
@@ -198,9 +225,72 @@ READ_TOOLS: list[dict[str, Any]] = [
         ),
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "get_full_transcript",
+        "description": (
+            "Return the FULL transcript of the active source as a list of "
+            "segments with word-level timestamps. Use this for highlight "
+            "extraction or any task that needs to scan the whole video. "
+            "Output is condensed (one line per segment with start/end + text) "
+            "to keep token cost reasonable."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
 
 ACTION_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "propose_create_highlight_clip",
+        "description": (
+            "Propose extracting a highlight clip from the active source. "
+            "When applied, this adds a clip to the splice timeline covering "
+            "the given source-time range — the user can then export it as "
+            "a standalone short, or combine it with other highlights into a "
+            "compilation.\n\n"
+            "Use for requests like 'make a 1-minute YouTube clip', 'pull out "
+            "the best moments', 'find a viral hook'. Always read the full "
+            "transcript first via `get_full_transcript`, then pick ranges "
+            "based on engagement: complete thoughts (not mid-sentence), "
+            "hooks/payoffs/tension, energy spikes, memorable lines. Propose "
+            "2–5 candidates with titles so the user can pick — don't propose "
+            "one and stop.\n\n"
+            "Respect the user's duration ask within ~10%. If they say "
+            "'1 minute', target 50-70s. Default duration when unspecified: "
+            "30-60s per clip."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start": {
+                    "type": "number",
+                    "description": "Start time in source seconds.",
+                },
+                "end": {
+                    "type": "number",
+                    "description": "End time in source seconds (must be > start).",
+                },
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Short clip title shown in the splice timeline "
+                        "header. 4-8 words, captures the hook. E.g. "
+                        "\"The 'aha' moment about pacing\" or \"Why I "
+                        "switched from Final Cut\"."
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "One-line description shown in the proposal card. "
+                        "Include the time range and why this clip works. "
+                        "E.g. \"Add highlight (1:22-2:05): the punchline "
+                        "lands cleanly and the energy peaks here.\""
+                    ),
+                },
+            },
+            "required": ["start", "end", "title", "summary"],
+        },
+    },
     {
         "name": "propose_add_custom_cut",
         "description": (
@@ -449,6 +539,32 @@ def _dispatch_read_tool(
                     })
         return {"window_start": t - win, "window_end": t + win, "words": words}
 
+    if name == "get_full_transcript":
+        analysis = _load_analysis(ctx)
+        if analysis is None:
+            return (
+                "No analysis available — the user must run Analyze on the "
+                "active source first."
+            )
+        # Condense to one line per segment so Claude can scan a 30-min
+        # transcript in a few thousand tokens. Word-level timestamps are
+        # still available via `get_transcript_around` when needed.
+        segments = []
+        for seg in analysis.speech.segments:
+            text = " ".join(w.text for w in seg.words).strip()
+            if not text:
+                continue
+            segments.append({
+                "start": round(seg.start, 2),
+                "end": round(seg.end, 2),
+                "text": text,
+            })
+        return {
+            "duration": round(analysis.speech.duration_seconds, 2),
+            "segment_count": len(segments),
+            "segments": segments,
+        }
+
     if name == "get_classification_summary":
         if bundle is None:
             return "no classification"
@@ -600,6 +716,16 @@ def _make_proposed_action(name: str, args: dict[str, Any]) -> ProposedAction:
     """Translate a `propose_<X>` tool call into a structured ProposedAction
     the frontend can apply via its action dispatcher."""
     summary = args.get("summary", name)
+    if name == "propose_create_highlight_clip":
+        return ProposedAction(
+            type="add_splice_clip",
+            summary=summary,
+            params={
+                "start": args.get("start"),
+                "end": args.get("end"),
+                "title": args.get("title", ""),
+            },
+        )
     if name == "propose_add_custom_cut":
         return ProposedAction(
             type="add_custom_cut",

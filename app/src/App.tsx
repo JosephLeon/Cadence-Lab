@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { TopBar, type AppView } from "./components/TopBar";
+import { TopBar } from "./components/TopBar";
+import { useAppView } from "./stores/appView";
 import { MediaBrowser } from "./components/MediaBrowser";
 import { Canvas } from "./components/Canvas";
 import { RightPanel } from "./components/RightPanel";
@@ -18,7 +19,8 @@ import { useProjectSourceSync } from "./hooks/useProjectSourceSync";
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [view, setView] = useState<AppView>("ai");
+  const view = useAppView((s) => s.view);
+  const setView = useAppView((s) => s.setView);
   useKeyboardShortcuts();
 
   // Try to restore the last-active project on mount. Failure (project was
