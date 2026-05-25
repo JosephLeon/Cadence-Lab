@@ -75,6 +75,13 @@ export const api = {
       },
     ),
 
+  /** Irreversibly delete a project (directory + manifest + all artifacts/renders). */
+  deleteProject: (slug: string) =>
+    jsonFetch<{ status: string; slug: string }>(
+      `/projects/${encodeURIComponent(slug)}`,
+      { method: "DELETE" },
+    ),
+
   probe: (source_path: string) =>
     jsonFetch<ProbeResponse>("/probe", {
       method: "POST",

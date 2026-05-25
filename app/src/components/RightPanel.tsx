@@ -21,7 +21,7 @@ export function RightPanel({ onOpenReview }: Props) {
   const active = useProject((s) => s.activeMediaPath);
   const setAudio = useProject((s) => s.setAudio);
   const item = media.find((m) => m.path === active);
-  const { runStage } = usePipeline(active);
+  const { runStage, runAllStages } = usePipeline(active);
 
   const [tab, setTab] = useState<Tab>("pacing");
 
@@ -50,7 +50,11 @@ export function RightPanel({ onOpenReview }: Props) {
       {/* Pipeline — feeds both Pacing and Audio. Lives above the tabs so
           it's clear these stages are prerequisites for either flow. */}
       <div className="shrink-0 border-b border-border">
-        <PipelineSection item={item} onRun={runStage} />
+        <PipelineSection
+          item={item}
+          onRun={runStage}
+          onRunAll={runAllStages}
+        />
       </div>
 
       {/* Project Files — browse sources and accumulated renders for the
@@ -89,9 +93,11 @@ export function RightPanel({ onOpenReview }: Props) {
 function PipelineSection({
   item,
   onRun,
+  onRunAll,
 }: {
   item: MediaItem;
   onRun: (stage: "analyze" | "classify" | "plan" | "render") => void;
+  onRunAll: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const stagesDone =
@@ -141,9 +147,29 @@ function PipelineSection({
       {open && (
         <div className="px-3 pb-3">
           <p className="text-[10px] text-text-secondary px-1 mb-2 leading-snug">
-            Required before Pacing or Audio settings can be rendered. Walk
-            through these three stages in order.
+            Required before Pacing settings can be rendered (Audio doesn't
+            need it). Walk through these three stages in order or run all
+            at once.
           </p>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRunAll();
+            }}
+            disabled={stagesDone === 3 || !!isRunning}
+            className="w-full mb-2 h-8 rounded-md bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-bg-elevated text-white text-xs font-medium transition-colors"
+            title={
+              stagesDone === 3
+                ? "Pipeline already complete"
+                : "Run analyze → classify → plan in sequence"
+            }
+          >
+            {isRunning
+              ? `Running ${item.job?.stage}…`
+              : stagesDone === 3
+              ? "✓ Pipeline complete"
+              : `▶ Run all (${3 - stagesDone} left)`}
+          </button>
           <div className="rounded-md border border-border bg-bg p-2 space-y-1">
             <StageRow
               label="Analyze speech"

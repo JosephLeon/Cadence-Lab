@@ -256,6 +256,19 @@ def save_project_endpoint(
     return body
 
 
+@app.delete("/projects/{slug}")
+def delete_project_endpoint(slug: str) -> dict[str, str]:
+    """Permanently delete a project directory and everything in it.
+    Irreversible."""
+    try:
+        _projects_mod.delete_project(slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+    except _projects_mod.ProjectError as e:
+        raise HTTPException(400, str(e))
+    return {"status": "deleted", "slug": slug}
+
+
 @app.post("/projects/{slug}/sources")
 def add_source_endpoint(
     slug: str, req: AddSourceRequest

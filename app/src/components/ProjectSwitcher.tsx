@@ -22,6 +22,7 @@ export function ProjectSwitcher() {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [digestOpen, setDigestOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   const qc = useQueryClient();
 
@@ -116,6 +117,15 @@ export function ProjectSwitcher() {
           >
             Close project
           </button>
+          <button
+            onClick={() => {
+              setDeleting(true);
+              setPopoverOpen(false);
+            }}
+            className="w-full text-left px-3 py-2 text-sm hover:bg-rose-500/20 text-rose-400 transition-colors border-t border-border"
+          >
+            Delete this project…
+          </button>
 
           {others.length > 0 && (
             <>
@@ -166,6 +176,111 @@ export function ProjectSwitcher() {
       {digestOpen && (
         <DigestModal onClose={() => setDigestOpen(false)} />
       )}
+
+      {deleting && project && (
+        <DeleteProjectModal
+          project={project}
+          onClose={() => setDeleting(false)}
+          onDeleted={() => {
+            setDeleting(false);
+            close();
+            void qc.invalidateQueries({ queryKey: ["projects-list"] });
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function DeleteProjectModal({
+  project,
+  onClose,
+  onDeleted,
+}: {
+  project: { slug: string; name: string };
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  // Confirm-by-typing: prevents fat-finger destruction. Case-insensitive
+  // so the uppercased label hint doesn't trip the user up.
+  const [typed, setTyped] = useState("");
+  const canDelete =
+    typed.trim().toLowerCase() === project.name.toLowerCase() && !busy;
+
+  const submit = async () => {
+    if (!canDelete) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.deleteProject(project.slug);
+      onDeleted();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+    >
+      <div
+        className="w-[460px] rounded-lg border border-rose-400/40 bg-bg-panel shadow-2xl p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-base font-semibold text-rose-400 mb-1">
+          Delete project
+        </h3>
+        <p className="text-xs text-text-secondary mb-3 leading-snug">
+          This permanently deletes the entire project directory, including
+          all sources, artifacts, and rendered MP4s. Cannot be undone.
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+        >
+          <label className="block text-[10px] tracking-wider text-text-secondary mb-1">
+            <span className="uppercase">Type</span>{" "}
+            <span className="font-mono text-text-primary normal-case">
+              {project.name}
+            </span>{" "}
+            <span className="uppercase">to confirm</span>
+          </label>
+          <input
+            autoFocus
+            type="text"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            className="w-full h-9 rounded border border-border bg-bg px-3 text-sm focus:outline-none focus:border-accent"
+          />
+          {err && (
+            <div className="mt-2 text-xs text-rose-400" title={err}>
+              ✗ {err}
+            </div>
+          )}
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="h-8 px-3 rounded bg-bg-elevated hover:bg-border text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!canDelete}
+              className="h-8 px-4 rounded bg-rose-500 hover:bg-rose-600 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {busy ? "Deleting…" : "Delete project"}
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }

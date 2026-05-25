@@ -71,15 +71,20 @@ function hydrateSpliceTimeline(project: Project) {
 }
 
 function syncStoresWithProject(project: Project) {
-  const desiredAbsPaths = project.sources.map((s) =>
+  const sourceAbsPaths = project.sources.map((s) =>
     absoluteSourcePath(project, s),
   );
+  // Renders are first-class media too — each rendered MP4 is a real file
+  // the user might want to play, run the pipeline on, or drag into the
+  // splice timeline. We surface them in the same library lists as sources
+  // so the AI/Splicing tabs treat them uniformly.
+  const renderAbsPaths = project.render_history.map(
+    (r) => `${project.path}/${r.output}`,
+  );
+  const desiredAbsPaths = [...sourceAbsPaths, ...renderAbsPaths];
   const desiredSet = new Set(desiredAbsPaths);
 
   // ─── useProject (AI tab) ─────────────────────────────────────────────────
-  // Hydrate per-source AI state (audio + overrides) from the project
-  // manifest on add. Existing items aren't touched so an in-flight edit
-  // isn't clobbered by a backend refresh.
   {
     const { media, addMedia, updateMedia, removeMedia } =
       useProject.getState();

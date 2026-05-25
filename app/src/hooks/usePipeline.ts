@@ -85,8 +85,16 @@ export function usePipeline(mediaPath: string | null) {
 
   const runStage = useCallback(
     async (stage: Stage) => {
-      if (!mediaPath || !media) return;
-      // Initial job marker
+      if (!mediaPath) return;
+      // Always read the latest media snapshot from the store rather than
+      // the React closure. When `runAllStages` chains stages, the next
+      // stage's prerequisite check must see the artifact paths the
+      // previous stage just wrote — those updates are in the store, not
+      // in the closure-captured `media` from the time runStage was
+      // memoized.
+      const latest = () =>
+        useProject.getState().media.find((m) => m.path === mediaPath);
+      if (!latest()) return;
       updateMedia(mediaPath, {
         job: { stage, progress: 0, message: "Starting…" },
       });
@@ -100,15 +108,17 @@ export function usePipeline(mediaPath: string | null) {
           const job = await waitForJob(handle.job_id, setJobProgress);
           const analysisPath = (job.result as { analysis_path: string } | null)
             ?.analysis_path;
+          const cur = latest();
           updateMedia(mediaPath, {
-            pipeline: { ...media.pipeline, analysisPath },
+            pipeline: { ...cur?.pipeline, analysisPath },
             job: null,
           });
         } else if (stage === "classify") {
-          if (!media.pipeline.analysisPath)
+          const cur = latest();
+          if (!cur?.pipeline.analysisPath)
             throw new Error("Analyze first.");
           const handle = await api.classify({
-            analysis_path: media.pipeline.analysisPath,
+            analysis_path: cur.pipeline.analysisPath,
           });
           updateMedia(mediaPath, {
             job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
@@ -117,44 +127,45 @@ export function usePipeline(mediaPath: string | null) {
           const classifiedPath = (
             job.result as { classified_path: string } | null
           )?.classified_path;
+          const after = latest();
           updateMedia(mediaPath, {
-            pipeline: { ...media.pipeline, classifiedPath },
+            pipeline: { ...after?.pipeline, classifiedPath },
             job: null,
           });
         } else if (stage === "plan") {
-          if (!media.pipeline.analysisPath)
+          const cur = latest();
+          if (!cur?.pipeline.analysisPath)
             throw new Error("Analyze first.");
-          if (!media.pipeline.classifiedPath)
+          if (!cur.pipeline.classifiedPath)
             throw new Error("Classify first.");
-          // Sync — quick interval algebra, no SSE needed.
           setJobProgress(0.5, "Computing keep-segments…");
           const res = await api.plan({
-            analysis_path: media.pipeline.analysisPath,
-            classified_path: media.pipeline.classifiedPath,
+            analysis_path: cur.pipeline.analysisPath,
+            classified_path: cur.pipeline.classifiedPath,
           });
+          const after = latest();
           updateMedia(mediaPath, {
-            pipeline: { ...media.pipeline, planPath: res.plan_path },
+            pipeline: { ...after?.pipeline, planPath: res.plan_path },
             job: null,
           });
         } else if (stage === "render" || stage === "render_audio") {
-          // Pacing render needs analysis + plan. Audio-only render just
-          // needs the source path — explicitly no plan, so the AI cuts
-          // don't get baked in alongside the audio enhancement.
+          const cur = latest();
+          if (!cur) return;
           const projectSlug = useActiveProject.getState().project?.slug;
           const renderReq: Parameters<typeof api.render>[0] =
             stage === "render"
               ? (() => {
-                  if (!media.pipeline.analysisPath)
+                  if (!cur.pipeline.analysisPath)
                     throw new Error("Analyze first.");
-                  if (!media.pipeline.planPath)
+                  if (!cur.pipeline.planPath)
                     throw new Error("Build a cut plan first.");
                   return {
-                    analysis_path: media.pipeline.analysisPath,
-                    plan_path: media.pipeline.planPath,
+                    analysis_path: cur.pipeline.analysisPath,
+                    plan_path: cur.pipeline.planPath,
                     audio: {
-                      enhance_speech: media.audio.enhance_speech,
-                      auto_duck: media.audio.auto_duck,
-                      ducking_db: media.audio.ducking_db,
+                      enhance_speech: cur.audio.enhance_speech,
+                      auto_duck: cur.audio.auto_duck,
+                      ducking_db: cur.audio.ducking_db,
                     },
                     project_slug: projectSlug,
                   };
@@ -162,9 +173,9 @@ export function usePipeline(mediaPath: string | null) {
               : {
                   source_path: mediaPath,
                   audio: {
-                    enhance_speech: media.audio.enhance_speech,
-                    auto_duck: media.audio.auto_duck,
-                    ducking_db: media.audio.ducking_db,
+                    enhance_speech: cur.audio.enhance_speech,
+                    auto_duck: cur.audio.auto_duck,
+                    ducking_db: cur.audio.ducking_db,
                   },
                   project_slug: projectSlug,
                 };
@@ -177,8 +188,9 @@ export function usePipeline(mediaPath: string | null) {
             | { rendered_path: string; project_slug?: string }
             | null;
           const renderedPath = result?.rendered_path;
+          const after = latest();
           updateMedia(mediaPath, {
-            pipeline: { ...media.pipeline, renderedPath },
+            pipeline: { ...after?.pipeline, renderedPath },
             job: null,
           });
           if (result?.project_slug) {
@@ -196,8 +208,40 @@ export function usePipeline(mediaPath: string | null) {
         });
       }
     },
-    [mediaPath, media, updateMedia, setJobProgress],
+    [mediaPath, updateMedia, setJobProgress],
   );
 
-  return { runStage, job: media?.job ?? null, pipeline: media?.pipeline ?? {} };
+  /**
+   * Run analyze → classify → plan sequentially, skipping any stage whose
+   * artifact already exists. Stops on the first failure (the failing
+   * stage's error lands in `media.job.error` via runStage). Safe to call
+   * even when all stages are already done — it's a no-op.
+   *
+   * Reads from the *latest* store state at each step rather than the
+   * `media` closure, so subsequent stages see the artifact paths the
+   * previous stage just wrote.
+   */
+  const runAllStages = useCallback(async () => {
+    if (!mediaPath) return;
+    const latest = () =>
+      useProject.getState().media.find((m) => m.path === mediaPath);
+    if (!latest()?.pipeline.analysisPath) {
+      await runStage("analyze");
+      if (latest()?.job?.error) return;
+    }
+    if (!latest()?.pipeline.classifiedPath) {
+      await runStage("classify");
+      if (latest()?.job?.error) return;
+    }
+    if (!latest()?.pipeline.planPath) {
+      await runStage("plan");
+    }
+  }, [mediaPath, runStage]);
+
+  return {
+    runStage,
+    runAllStages,
+    job: media?.job ?? null,
+    pipeline: media?.pipeline ?? {},
+  };
 }

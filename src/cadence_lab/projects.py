@@ -269,6 +269,26 @@ def save_project(project: Project) -> None:
     _atomic_write_text(_manifest_path(pdir), text)
 
 
+def delete_project(slug: str) -> None:
+    """Permanently delete a project directory + everything in it.
+
+    Irreversible. Frontend should confirm before calling. Raises
+    ``ProjectNotFound`` if the project doesn't exist; raises
+    ``ProjectError`` if the directory is somehow outside the projects
+    root (shouldn't happen, but defensive: we never want a slug-injection
+    bug to ``rm -rf`` somewhere unexpected).
+    """
+    pdir = _project_dir(slug)
+    root = projects_root()
+    try:
+        pdir.resolve().relative_to(root)
+    except ValueError as e:
+        raise ProjectError(f"refusing to delete outside projects root: {pdir}") from e
+    if not pdir.exists():
+        raise ProjectNotFound(f"no project at {pdir}")
+    shutil.rmtree(pdir)
+
+
 def list_projects() -> list[dict[str, Any]]:
     """Return a lightweight summary of every project on disk, sorted by
     most recently modified first. Doesn't validate manifests — used by the
