@@ -53,9 +53,16 @@ export interface ProjectAudioSettings {
   ducking_db: number;
 }
 
+export interface ProjectCustomCut {
+  start: number;
+  end: number;
+  reason: string;
+}
+
 export interface ProjectAIState {
   audio: ProjectAudioSettings;
   overrides: Record<string, string>;
+  custom_cuts: ProjectCustomCut[];
 }
 
 export interface ProjectSpliceClip {

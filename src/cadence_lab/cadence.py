@@ -43,8 +43,8 @@ request, then call the appropriate tools.
 You have two kinds of tools:
 
 - **Read tools** (list_pauses, list_fillers, get_transcript_around,
-  get_classification): these fetch project state so you can locate the
-  thing the user mentioned ("the um at 1:23", "the long pause around
+  get_classification_summary): these fetch project state so you can locate
+  the thing the user mentioned ("the um at 1:23", "the long pause around
   5:00"). Use them freely — they cost nothing.
 
 - **Propose tools** (propose_*): these don't apply edits directly. They
@@ -52,28 +52,66 @@ You have two kinds of tools:
   Be specific in the `summary` field — that's the only thing the user
   sees before clicking Apply.
 
-Guidelines:
+## What you CAN edit
 
-1. **Be precise.** If the user says "remove the um at 1:23", use
-   `list_fillers` to find the filler closest to that timestamp, then
-   propose the exact override. Don't propose vague "remove some fillers."
+You have three mutation tools:
 
-2. **Don't ask, propose.** The user explicitly invoked you to make
+- `propose_set_override` — flip a classifier-detected pause or filler to
+  cut / trim / keep / reject. Best when the thing the user wants to edit
+  is already in `list_pauses` or `list_fillers`; integrates with the
+  classifier's logic and audit trail.
+
+- `propose_add_custom_cut(start, end, summary)` — cut an arbitrary
+  source-time range. Use this when the content the user wants to remove
+  *isn't* in pauses/fillers (mistranscribed sounds, unflagged repeated
+  words, botched sentences, etc.). Get the exact times from
+  `get_transcript_around` — look at the `start`/`end` of each word.
+
+- `propose_set_audio_setting` — enhance_speech, auto_duck, ducking_db.
+
+You **cannot** (yet): modify the splice timeline, add/remove blanks, move
+clips, trigger renders, or perform semantic search / computer vision /
+audio-event detection (sniffles, throat clears).
+
+## Choosing the right cut tool
+
+| If the user wants to cut...                  | Use                       |
+|----------------------------------------------|----------------------------|
+| A classifier-detected pause/filler           | `propose_set_override`     |
+| A specific word or short phrase in the transcript | `propose_add_custom_cut`   |
+| Arbitrary unflagged content (vocalizations, noises) | `propose_add_custom_cut`   |
+
+For custom cuts, **always use `get_transcript_around` first** to find the
+exact word boundaries, then propose the cut with those timestamps.
+
+## Guidelines
+
+1. **Whisper isn't always right.** The transcript is the best signal we
+   have for what's in the audio, but Whisper sometimes mistranscribes
+   non-speech vocalizations (a sustained vowel might come back as "Oh"
+   when the user actually said "do do do"). If the user contradicts the
+   transcript, trust them — they were there. Propose the cut based on
+   the time range they specified.
+
+2. **Be precise about time.** When proposing a custom cut, get the
+   word-level start/end from `get_transcript_around` if you can. Don't
+   round to whole seconds — sub-second precision matters.
+
+3. **Don't ask, propose.** The user explicitly invoked you to make
    changes. Propose the edit; the user will reject it if wrong. Asking
    "should I cut this?" wastes a turn — propose it and explain in the
    summary.
 
-3. **Chain proposals when needed.** If the user says "remove all ums",
+4. **Chain proposals when needed.** If the user says "remove all ums",
    list the fillers, then call `propose_set_override` once per um.
 
-4. **When you finish proposing, end with a short text confirmation** —
-   what you proposed and why. The proposed actions show up automatically
-   in the UI; your text is just human-readable context.
+5. **End with a short text confirmation** — what you proposed and why.
+   The proposed actions show up automatically in the UI; your text is
+   just human-readable context.
 
-5. **Refuse cleanly** if the request can't be fulfilled with available
-   tools (e.g. "find clips where the speaker is laughing" — that's
-   computer-vision territory, which we don't have yet). Explain why
-   briefly and suggest what they could do instead.
+6. **Refuse cleanly** for capabilities we don't have yet (semantic media
+   search, audio-event detection for sniffles/throat-clears, computer
+   vision). Briefly explain why and suggest a workaround.
 """
 
 
@@ -163,6 +201,41 @@ READ_TOOLS: list[dict[str, Any]] = [
 ]
 
 ACTION_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "propose_add_custom_cut",
+        "description": (
+            "Propose cutting an arbitrary time range from the active source. "
+            "Use this when the user wants to remove content that ISN'T already "
+            "in list_pauses or list_fillers — e.g. a mistranscribed sound, a "
+            "repeated 'do do do' that the classifier didn't tag, or a botched "
+            "sentence the user wants gone. Get the time range from "
+            "get_transcript_around (look at the word `start`/`end` fields). "
+            "Don't use this for content that IS in fillers/pauses — use "
+            "propose_set_override there, it composes better with the "
+            "classifier's logic."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "start": {
+                    "type": "number",
+                    "description": "Start time in source seconds.",
+                },
+                "end": {
+                    "type": "number",
+                    "description": "End time in source seconds (must be > start).",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "Human-readable summary, e.g. \"Cut the 'do do do' "
+                        "vocalization (29.0s-29.9s)\"."
+                    ),
+                },
+            },
+            "required": ["start", "end", "summary"],
+        },
+    },
     {
         "name": "propose_set_override",
         "description": (
@@ -527,6 +600,15 @@ def _make_proposed_action(name: str, args: dict[str, Any]) -> ProposedAction:
     """Translate a `propose_<X>` tool call into a structured ProposedAction
     the frontend can apply via its action dispatcher."""
     summary = args.get("summary", name)
+    if name == "propose_add_custom_cut":
+        return ProposedAction(
+            type="add_custom_cut",
+            summary=summary,
+            params={
+                "start": args.get("start"),
+                "end": args.get("end"),
+            },
+        )
     if name == "propose_set_override":
         return ProposedAction(
             type="set_override",

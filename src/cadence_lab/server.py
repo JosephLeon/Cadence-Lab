@@ -357,6 +357,12 @@ def probe_endpoint(req: ProbeRequest) -> ProbeResponse:
         raise HTTPException(400, str(e)) from e
 
 
+class CustomCutInput(BaseModel):
+    start: float
+    end: float
+    reason: str = ""
+
+
 class PlanRequest(BaseModel):
     analysis_path: str
     classified_path: str | None = None  # default: derive from output_dir
@@ -364,6 +370,9 @@ class PlanRequest(BaseModel):
     # "pause:5" → "keep" | "trim" | "cut", "filler:3" → "keep" | "cut",
     # "retake:0" → "reject". Used by the review panel for re-plans.
     overrides: dict[str, str] | None = None
+    # Arbitrary cuts the user or Cadence added on top of classifier cuts.
+    # Source-time seconds. Merged with classifier cuts before complement.
+    custom_cuts: list[CustomCutInput] | None = None
     crossfade_ms: int = 20
     filler_pad_ms: int = 20
     default_breath_ms: int = 150
@@ -399,6 +408,11 @@ def plan_endpoint(req: PlanRequest) -> PlanResponse:
         modified = apply_overrides(cls_bundle.classification, parsed)  # type: ignore[arg-type]
         cls_bundle = cls_bundle.model_copy(update={"classification": modified})
 
+    custom_cuts_tuples = (
+        [(c.start, c.end, c.reason) for c in req.custom_cuts]
+        if req.custom_cuts
+        else None
+    )
     plan = plan_cuts(
         speech=bundle.speech,
         classification_bundle=cls_bundle,
@@ -408,6 +422,7 @@ def plan_endpoint(req: PlanRequest) -> PlanResponse:
             default_breath_ms=req.default_breath_ms,
             min_keep_ms=req.min_keep_ms,
         ),
+        custom_cuts=custom_cuts_tuples,
     )
 
     # Persist alongside the analysis so the next stage finds it.
@@ -545,6 +560,10 @@ class RenderRequest(BaseModel):
     - **Audio-only mode**: caller passes ``source_path`` instead. We render
       the *whole* source — no cuts — with the audio enhancement chain
       applied. Doesn't require the AI pipeline to have run.
+
+    Pacing mode also accepts ``overrides`` and ``custom_cuts``. When either
+    is provided, the render re-runs the planner internally before encoding,
+    so the latest session state is always reflected — no stale-plan footgun.
     """
     analysis_path: str | None = None
     plan_path: str | None = None
@@ -553,6 +572,11 @@ class RenderRequest(BaseModel):
     encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
     audio_bitrate: str = "192k"
     audio: AudioSettings | None = None
+    # Pacing-mode re-plan inputs. When set, /render re-runs the planner
+    # with these on top of the stored classification before encoding,
+    # so the user's latest overrides + custom cuts always make it in.
+    overrides: dict[str, str] | None = None
+    custom_cuts: list[CustomCutInput] | None = None
     # If set, the rendered MP4 is placed under the project's renders/ dir
     # with an `rNNN` ID prefix, and a render_history entry is appended.
     project_slug: str | None = None
@@ -606,14 +630,48 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
             raise HTTPException(404, f"analysis not found: {ap}")
         bundle = AnalysisBundle.model_validate_json(ap.read_text())
 
-        pp = (
-            Path(req.plan_path).expanduser()
-            if req.plan_path
-            else plan_path(bundle.ingest.source.path)
-        )
-        if not pp.exists():
-            raise HTTPException(404, f"plan not found: {pp}")
-        plan = CutPlan.model_validate_json(pp.read_text())
+        # If the caller passed overrides or custom_cuts, re-run the planner
+        # in-process so the render reflects current session state. Plan is
+        # interval algebra — basically free, no separate disk round-trip.
+        if req.overrides is not None or req.custom_cuts is not None:
+            cp = classified_path(bundle.ingest.source.path)
+            if not cp.exists():
+                raise HTTPException(404, f"classification not found: {cp}")
+            cls_bundle = ClassificationBundle.model_validate_json(
+                cp.read_text()
+            )
+            if req.overrides:
+                from .reviewer import apply_overrides
+
+                parsed_ovr = {
+                    _parse_override_key(k): v
+                    for k, v in req.overrides.items()
+                }
+                modified = apply_overrides(
+                    cls_bundle.classification, parsed_ovr  # type: ignore[arg-type]
+                )
+                cls_bundle = cls_bundle.model_copy(
+                    update={"classification": modified}
+                )
+            custom_cut_tuples = (
+                [(c.start, c.end, c.reason) for c in req.custom_cuts]
+                if req.custom_cuts
+                else None
+            )
+            plan = plan_cuts(
+                speech=bundle.speech,
+                classification_bundle=cls_bundle,
+                custom_cuts=custom_cut_tuples,
+            )
+        else:
+            pp = (
+                Path(req.plan_path).expanduser()
+                if req.plan_path
+                else plan_path(bundle.ingest.source.path)
+            )
+            if not pp.exists():
+                raise HTTPException(404, f"plan not found: {pp}")
+            plan = CutPlan.model_validate_json(pp.read_text())
 
         src = bundle.ingest.source.path
         if not src.exists():

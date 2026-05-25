@@ -97,6 +97,11 @@ function syncStoresWithProject(project: Project) {
         addMedia(p, {
           audio: aiState?.audio,
           overrides: aiState?.overrides,
+          customCuts: aiState?.custom_cuts?.map((c) => ({
+            start: c.start,
+            end: c.end,
+            reason: c.reason,
+          })),
         });
         void probeIntoAITab(p, updateMedia);
       }

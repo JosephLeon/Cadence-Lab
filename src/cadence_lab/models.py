@@ -180,7 +180,9 @@ class ClassificationBundle(BaseModel):
 
 # ─── Stage 4: cut planning ────────────────────────────────────────────────────
 
-CutKind = Literal["pause_cut", "pause_trim", "filler_cut", "retake_cut"]
+CutKind = Literal[
+    "pause_cut", "pause_trim", "filler_cut", "retake_cut", "custom_cut"
+]
 
 
 class KeepSegment(BaseModel):

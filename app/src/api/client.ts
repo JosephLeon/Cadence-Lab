@@ -176,6 +176,11 @@ export const api = {
       auto_duck: boolean;
       ducking_db: number;
     };
+    /** Pacing-mode re-plan inputs. When present, /render re-runs the
+     *  planner with these on top of the classification before encoding,
+     *  so the user's latest in-session edits always make it in. */
+    overrides?: Record<string, string>;
+    custom_cuts?: Array<{ start: number; end: number; reason: string }>;
     /** When set, output is written to the project's renders/ dir as
      *  `rNNN.<stem>[.paced][.<audio-suffix>].mp4` and an entry is
      *  appended to the project's render_history. */

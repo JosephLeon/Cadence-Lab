@@ -144,8 +144,16 @@ def plan_cuts(
     speech: SpeechAnalysis,
     classification_bundle: ClassificationBundle,
     params: CutPlanParams | None = None,
+    custom_cuts: list[tuple[float, float, str]] | None = None,
 ) -> CutPlan:
-    """Convert classification output into a renderable CutPlan."""
+    """Convert classification output (plus any user/AI-added arbitrary cuts)
+    into a renderable CutPlan.
+
+    ``custom_cuts`` are (start_seconds, end_seconds, reason) tuples that the
+    user or Cadence added outside the classifier's pause/filler taxonomy.
+    They go through the same merge → complement pipeline as classifier
+    cuts, so overlaps are handled cleanly.
+    """
     params = params or CutPlanParams()
 
     pause_by_id = {p.id: p for p in classification_bundle.pause_candidates}
@@ -156,6 +164,14 @@ def plan_cuts(
         filler_by_id,
         params,
     )
+
+    # Layer in user/Cadence-added arbitrary cuts on top of the classifier
+    # ones. We tag them as `custom_cut` in the audit log so the UI can
+    # distinguish them from pause/filler/retake cuts.
+    if custom_cuts:
+        for (s, e, why) in custom_cuts:
+            if e > s:
+                cuts_raw.append((s, e, "custom_cut", why or "user/Cadence cut"))
 
     # Audit log: original intents, before any merging.
     cut_ops = [

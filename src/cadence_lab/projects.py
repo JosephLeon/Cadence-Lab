@@ -86,10 +86,26 @@ class AudioSettings(BaseModel):
     ducking_db: int = -8
 
 
+class CustomCut(BaseModel):
+    """An arbitrary time-range cut on a source, outside the classifier's
+    pause/filler taxonomy. Lets the user (or Cadence) cut content the
+    classifier didn't flag — e.g. a mistranscribed vocalization, a misspoken
+    word, or a non-speech sound the audio-event detector doesn't catch yet.
+
+    Stored in source-time seconds. The planner subtracts these ranges from
+    the keep-segments produced by the classifier-derived plan.
+    """
+    start: float
+    end: float
+    reason: str = ""
+
+
 class AIState(BaseModel):
-    """Per-source AI-tab state — sticky audio settings + review overrides."""
+    """Per-source AI-tab state — sticky audio settings + review overrides
+    + user/Cadence-added arbitrary cuts."""
     audio: AudioSettings = Field(default_factory=AudioSettings)
     overrides: dict[str, str] = Field(default_factory=dict)
+    custom_cuts: list[CustomCut] = Field(default_factory=list)
 
 
 class SpliceClipEntry(BaseModel):

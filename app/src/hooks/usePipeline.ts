@@ -167,6 +167,15 @@ export function usePipeline(mediaPath: string | null) {
                       auto_duck: cur.audio.auto_duck,
                       ducking_db: cur.audio.ducking_db,
                     },
+                    // Always send current overrides + custom_cuts so the
+                    // backend re-plans on top of the latest session state.
+                    // Plan is interval algebra — basically free.
+                    overrides: cur.overrides,
+                    custom_cuts: cur.customCuts.map((c) => ({
+                      start: c.start,
+                      end: c.end,
+                      reason: c.reason,
+                    })),
                     project_slug: projectSlug,
                   };
                 })()

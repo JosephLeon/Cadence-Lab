@@ -7,6 +7,8 @@ import type {
   SpeechEnhanceLevel,
 } from "../stores/project";
 import { useProject } from "../stores/project";
+import { useCanvasView } from "../stores/canvasView";
+import { videoRef } from "../stores/videoRef";
 import { usePipeline } from "../hooks/usePipeline";
 import { ProjectFilesPanel } from "./ProjectFilesPanel";
 
@@ -324,6 +326,13 @@ function Inspector({ item }: { item: MediaItem }) {
   );
 }
 
+function fmtClipTime(s: number): string {
+  if (!Number.isFinite(s) || s < 0) return "0:00.0";
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
+}
+
 function KV({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="flex items-center justify-between px-1 py-0.5 text-xs">
@@ -342,6 +351,19 @@ interface PacingTabProps {
 }
 
 function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
+  const removeCustomCut = useProject((s) => s.removeCustomCut);
+  const setCanvasView = useCanvasView((s) => s.setView);
+
+  /**
+   * Audition a custom cut: jump the Canvas to the source video (custom
+   * cuts only exist on the source — the rendered file would already have
+   * them removed) and play from ~1s before to ~1s after the cut range so
+   * the user can hear/see what would be removed.
+   */
+  const previewCut = (start: number, end: number) => {
+    setCanvasView("source");
+    videoRef.previewRange(start, end, { padBefore: 1.0, padAfter: 1.0 });
+  };
   const isRendering =
     item.job?.stage === "render" && !item.job.error;
   const renderError =
@@ -351,6 +373,42 @@ function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
 
   return (
     <>
+      {item.customCuts.length > 0 && (
+        <Section title={`Custom cuts (${item.customCuts.length})`}>
+          <ul className="space-y-1">
+            {item.customCuts.map((c, i) => (
+              <li
+                key={`${c.start}-${c.end}-${i}`}
+                className="group flex items-start gap-2 px-2 py-1.5 rounded hover:bg-bg-elevated text-xs cursor-pointer"
+                onClick={() => previewCut(c.start, c.end)}
+                title="Click to preview — plays the source from 1s before to 1s after the cut"
+              >
+                <span className="text-text-muted shrink-0 mt-0.5">▶</span>
+                <span className="font-mono text-text-secondary shrink-0">
+                  {fmtClipTime(c.start)}–{fmtClipTime(c.end)}
+                </span>
+                <span className="flex-1 text-text-muted truncate" title={c.reason}>
+                  {c.reason || "(no reason given)"}
+                </span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeCustomCut(item.path, i);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-rose-400 shrink-0"
+                  title="Remove custom cut"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[10px] text-text-muted mt-2 px-1 leading-snug">
+            Click a row to preview · Applied on top of the AI cut plan at render time.
+          </p>
+        </Section>
+      )}
+
       <Section title="Review">
         <button
           onClick={onOpenReview}

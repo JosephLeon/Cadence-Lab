@@ -36,6 +36,23 @@ export function applyCadenceAction(action: ProposedAction): void {
       return;
     }
 
+    case "add_custom_cut": {
+      const sourcePath = activeMediaPathOrThrow(
+        "add_custom_cut needs an active source",
+      );
+      const start = numberParam(params, "start");
+      const end = numberParam(params, "end");
+      if (!(end > start)) {
+        throw new Error(
+          `end (${end}) must be strictly greater than start (${start})`,
+        );
+      }
+      const reason =
+        typeof params.reason === "string" ? params.reason : "added by Cadence";
+      useProject.getState().addCustomCut(sourcePath, { start, end, reason });
+      return;
+    }
+
     case "set_audio_setting": {
       const sourcePath = activeMediaPathOrThrow(
         "set_audio_setting needs an active source",
@@ -81,6 +98,14 @@ function stringParam(params: Record<string, unknown>, key: string): string {
   const v = params[key];
   if (typeof v !== "string") {
     throw new Error(`expected string param '${key}', got ${typeof v}`);
+  }
+  return v;
+}
+
+function numberParam(params: Record<string, unknown>, key: string): number {
+  const v = params[key];
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    throw new Error(`expected number param '${key}', got ${typeof v}`);
   }
   return v;
 }

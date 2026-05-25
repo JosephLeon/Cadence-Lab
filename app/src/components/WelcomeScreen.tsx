@@ -14,9 +14,14 @@ export function WelcomeScreen() {
   const error = useActiveProject((s) => s.error);
   const [creating, setCreating] = useState(false);
 
+  // Always refetch on mount so closing a project + returning to welcome
+  // (or coming back to the app after creating/deleting elsewhere) shows
+  // the current list, not whatever was cached from the previous visit.
   const projectsQuery = useQuery({
     queryKey: ["projects-list"],
     queryFn: () => api.listProjects(),
+    staleTime: 0,
+    refetchOnMount: "always",
   });
 
   return (
