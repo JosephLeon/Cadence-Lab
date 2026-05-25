@@ -11,16 +11,14 @@ interface Props {
 
 export function TopBar({ serverOk, view, onViewChange }: Props) {
   const hasProject = useActiveProject((s) => s.project !== null);
+  // Only surface the server indicator when it's actually informative —
+  // i.e. while we're still connecting on first launch, or after the
+  // sidecar dies. The healthy state is the 99% case and just adds noise.
+  const showServerStatus = serverOk !== true;
+
   return (
     <header className="h-12 shrink-0 border-b border-border flex items-center px-4 gap-3 bg-bg-panel">
-      <div className="flex items-center gap-2">
-        <img
-          src="/icon.png"
-          alt=""
-          className="h-6 w-6 rounded-md shadow-sm"
-        />
-        <h1 className="font-semibold tracking-tight">Cadence Lab</h1>
-      </div>
+      <h1 className="font-semibold tracking-tight">Cadence Lab</h1>
 
       <ProjectSwitcher />
 
@@ -49,25 +47,21 @@ export function TopBar({ serverOk, view, onViewChange }: Props) {
         disabled
       />
 
-      <div className="flex items-center gap-2 text-xs">
-        <span
-          className={
-            "inline-block h-2 w-2 rounded-full " +
-            (serverOk === null
-              ? "bg-text-muted animate-pulse"
-              : serverOk
-              ? "bg-emerald-500"
-              : "bg-rose-500")
-          }
-        />
-        <span className="text-text-secondary">
-          {serverOk === null
-            ? "Connecting…"
-            : serverOk
-            ? "Server"
-            : "Disconnected"}
-        </span>
-      </div>
+      {showServerStatus && (
+        <div className="flex items-center gap-2 text-xs">
+          <span
+            className={
+              "inline-block h-2 w-2 rounded-full " +
+              (serverOk === null
+                ? "bg-text-muted animate-pulse"
+                : "bg-rose-500")
+            }
+          />
+          <span className="text-text-secondary">
+            {serverOk === null ? "Connecting…" : "Disconnected"}
+          </span>
+        </div>
+      )}
     </header>
   );
 }
