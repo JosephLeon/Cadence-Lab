@@ -39,9 +39,17 @@ export function RightPanel({ onOpenReview }: Props) {
     <aside className="w-80 shrink-0 border-l border-border bg-bg-panel flex flex-col min-h-0">
       <PanelHeader />
 
-      {/* Inspector — context that applies regardless of tab */}
-      <div className="shrink-0 border-b border-border p-3">
+      {/* Inspector — context that applies regardless of tab. Collapsible
+          and starts closed to save vertical space; the data here is rarely
+          needed once the user knows what clip they loaded. */}
+      <div className="shrink-0 border-b border-border">
         <Inspector item={item} />
+      </div>
+
+      {/* Pipeline — feeds both Pacing and Audio. Lives above the tabs so
+          it's clear these stages are prerequisites for either flow. */}
+      <div className="shrink-0 border-b border-border">
+        <PipelineSection item={item} onRun={runStage} />
       </div>
 
       {/* Tabs */}
@@ -52,11 +60,7 @@ export function RightPanel({ onOpenReview }: Props) {
       {/* Tab content (scrolls) */}
       <div className="flex-1 overflow-y-auto p-3 space-y-4 min-h-0">
         {tab === "pacing" ? (
-          <PacingTab
-            item={item}
-            onRun={runStage}
-            onOpenReview={onOpenReview}
-          />
+          <PacingTab item={item} onOpenReview={onOpenReview} />
         ) : (
           <AudioTab
             item={item}
@@ -73,6 +77,103 @@ export function RightPanel({ onOpenReview }: Props) {
         />
       </div>
     </aside>
+  );
+}
+
+function PipelineSection({
+  item,
+  onRun,
+}: {
+  item: MediaItem;
+  onRun: (stage: "analyze" | "classify" | "plan" | "render") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const stagesDone =
+    (item.pipeline.analysisPath ? 1 : 0) +
+    (item.pipeline.classifiedPath ? 1 : 0) +
+    (item.pipeline.planPath ? 1 : 0);
+  const isRunning =
+    item.job &&
+    (item.job.stage === "analyze" ||
+      item.job.stage === "classify" ||
+      item.job.stage === "plan") &&
+    !item.job.error;
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-text-muted text-xs w-3 shrink-0">
+            {open ? "▾" : "▸"}
+          </span>
+          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
+            Pipeline
+          </h3>
+          {!open && (
+            <span
+              className={
+                "text-xs truncate " +
+                (stagesDone === 3
+                  ? "text-emerald-400"
+                  : isRunning
+                  ? "text-accent"
+                  : "text-text-secondary")
+              }
+            >
+              {isRunning
+                ? `${item.job?.stage}…`
+                : stagesDone === 3
+                ? "✓ ready to render"
+                : `${stagesDone}/3 stages complete`}
+            </span>
+          )}
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          <p className="text-[10px] text-text-secondary px-1 mb-2 leading-snug">
+            Required before Pacing or Audio settings can be rendered. Walk
+            through these three stages in order.
+          </p>
+          <div className="rounded-md border border-border bg-bg p-2 space-y-1">
+            <StageRow
+              label="Analyze speech"
+              hint="Whisper + VAD via Groq"
+              stage="analyze"
+              done={!!item.pipeline.analysisPath}
+              disabled={false}
+              job={item.job}
+              onRun={() => onRun("analyze")}
+            />
+            <StageRow
+              label="Classify pauses & fillers"
+              hint="Claude Opus 4.7"
+              stage="classify"
+              done={!!item.pipeline.classifiedPath}
+              disabled={!item.pipeline.analysisPath}
+              disabledReason="Run Analyze first"
+              job={item.job}
+              onRun={() => onRun("classify")}
+            />
+            <StageRow
+              label="Build cut plan"
+              hint="Interval algebra (instant)"
+              stage="plan"
+              done={!!item.pipeline.planPath}
+              disabled={
+                !item.pipeline.analysisPath || !item.pipeline.classifiedPath
+              }
+              disabledReason="Classify first"
+              job={item.job}
+              onRun={() => onRun("plan")}
+            />
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -128,39 +229,64 @@ function TabButton({
 // ─── Inspector (always visible) ──────────────────────────────────────────────
 
 function Inspector({ item }: { item: MediaItem }) {
+  const [open, setOpen] = useState(false);
+  const fileName = item.path.split("/").pop() ?? "—";
+
   return (
-    <div className="space-y-1">
-      <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted mb-2">
-        Inspector
-      </h3>
-      <KV label="File" value={item.path.split("/").pop() ?? "—"} />
-      {item.probe && (
-        <>
-          <KV
-            label="Duration"
-            value={`${item.probe.duration_seconds.toFixed(1)} s`}
-          />
-          <KV
-            label="Resolution"
-            value={
-              item.probe.width
-                ? `${item.probe.width}×${item.probe.height}`
-                : "—"
-            }
-          />
-          <KV
-            label="Frame rate"
-            value={
-              item.probe.frame_rate
-                ? `${item.probe.frame_rate.toFixed(2)} fps`
-                : "—"
-            }
-          />
-          <KV
-            label="Audio tracks"
-            value={item.probe.audio_tracks.length}
-          />
-        </>
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-text-muted text-xs w-3 shrink-0">
+            {open ? "▾" : "▸"}
+          </span>
+          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
+            Inspector
+          </h3>
+          {!open && (
+            <span
+              className="text-xs text-text-secondary truncate"
+              title={fileName}
+            >
+              {fileName}
+            </span>
+          )}
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-1">
+          <KV label="File" value={fileName} />
+          {item.probe && (
+            <>
+              <KV
+                label="Duration"
+                value={`${item.probe.duration_seconds.toFixed(1)} s`}
+              />
+              <KV
+                label="Resolution"
+                value={
+                  item.probe.width
+                    ? `${item.probe.width}×${item.probe.height}`
+                    : "—"
+                }
+              />
+              <KV
+                label="Frame rate"
+                value={
+                  item.probe.frame_rate
+                    ? `${item.probe.frame_rate.toFixed(2)} fps`
+                    : "—"
+                }
+              />
+              <KV
+                label="Audio tracks"
+                value={item.probe.audio_tracks.length}
+              />
+            </>
+          )}
+        </div>
       )}
     </div>
   );
@@ -179,47 +305,12 @@ function KV({ label, value }: { label: string; value: string | number }) {
 
 interface PacingTabProps {
   item: MediaItem;
-  onRun: (stage: "analyze" | "classify" | "plan" | "render") => void;
   onOpenReview: () => void;
 }
 
-function PacingTab({ item, onRun, onOpenReview }: PacingTabProps) {
+function PacingTab({ item, onOpenReview }: PacingTabProps) {
   return (
     <>
-      <Section title="Pipeline">
-        <StageRow
-          label="Analyze speech"
-          hint="Whisper + VAD via Groq"
-          stage="analyze"
-          done={!!item.pipeline.analysisPath}
-          disabled={false}
-          job={item.job}
-          onRun={() => onRun("analyze")}
-        />
-        <StageRow
-          label="Classify pauses & fillers"
-          hint="Claude Opus 4.7"
-          stage="classify"
-          done={!!item.pipeline.classifiedPath}
-          disabled={!item.pipeline.analysisPath}
-          disabledReason="Run Analyze first"
-          job={item.job}
-          onRun={() => onRun("classify")}
-        />
-        <StageRow
-          label="Build cut plan"
-          hint="Interval algebra (instant)"
-          stage="plan"
-          done={!!item.pipeline.planPath}
-          disabled={
-            !item.pipeline.analysisPath || !item.pipeline.classifiedPath
-          }
-          disabledReason="Classify first"
-          job={item.job}
-          onRun={() => onRun("plan")}
-        />
-      </Section>
-
       <Section title="Review">
         <button
           onClick={onOpenReview}

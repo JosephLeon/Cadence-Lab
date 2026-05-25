@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   useSplicing,
@@ -325,13 +325,17 @@ function ExportButton() {
   const library = useSplicing((s) => s.library);
   const [job, setJob] = useState<
     | { status: "idle" }
+    | { status: "naming" }
     | { status: "running"; progress: number; message: string }
     | { status: "done"; outputName: string; outputPath: string }
     | { status: "error"; error: string }
   >({ status: "idle" });
 
   const total = totalDuration(timeline);
-  const disabled = timeline.length === 0 || job.status === "running";
+  const disabled =
+    timeline.length === 0 ||
+    job.status === "running" ||
+    job.status === "naming";
 
   // Pick reasonable defaults for target geometry: use the largest probed
   // dimensions in the library so we don't downscale anyone.
@@ -348,16 +352,7 @@ function ExportButton() {
       .filter((n): n is number => Number.isFinite(n)),
   );
 
-  const onClick = async () => {
-    const suggested = `splice_${new Date()
-      .toISOString()
-      .replace(/[:T]/g, "-")
-      .slice(0, 19)}`;
-    const name = window.prompt(
-      "Export filename (without .mp4):",
-      suggested,
-    );
-    if (!name) return;
+  const beginExport = async (name: string) => {
     setJob({ status: "running", progress: 0, message: "Submitting…" });
     try {
       const handle = await api.spliceRender({
@@ -463,18 +458,114 @@ function ExportButton() {
     );
   }
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className="h-7 px-3 rounded bg-accent hover:bg-accent/80 text-white text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-      title={
-        disabled && timeline.length === 0
-          ? "Add clips to the timeline first"
-          : `Export ${fmtDuration(total)} assembly`
-      }
+    <>
+      <button
+        onClick={() => setJob({ status: "naming" })}
+        disabled={disabled}
+        className="h-7 px-3 rounded bg-accent hover:bg-accent/80 text-white text-xs font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        title={
+          disabled && timeline.length === 0
+            ? "Add clips to the timeline first"
+            : `Export ${fmtDuration(total)} assembly`
+        }
+      >
+        ▶ Export MP4
+      </button>
+      {job.status === "naming" && (
+        <ExportNameDialog
+          onCancel={() => setJob({ status: "idle" })}
+          onConfirm={(name) => beginExport(name)}
+        />
+      )}
+    </>
+  );
+}
+
+function ExportNameDialog({
+  onConfirm,
+  onCancel,
+}: {
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}) {
+  // Default filename: splice_YYYY-MM-DD-HH-MM-SS, recomputed once per
+  // dialog open.
+  const [name, setName] = useState(() => {
+    const ts = new Date()
+      .toISOString()
+      .replace(/[:T]/g, "-")
+      .slice(0, 19);
+    return `splice_${ts}`;
+  });
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  const trimmed = name.trim();
+  const valid = trimmed.length > 0;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onCancel}
     >
-      ▶ Export MP4
-    </button>
+      <div
+        className="w-[420px] rounded-lg border border-border bg-bg-panel shadow-2xl p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-base font-semibold text-text-primary mb-1">
+          Export assembled video
+        </h3>
+        <p className="text-xs text-text-muted mb-3">
+          Saved to the files directory as ".mp4".
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (valid) onConfirm(trimmed);
+          }}
+        >
+          <label className="block text-[10px] uppercase tracking-wider text-text-secondary mb-1">
+            Filename
+          </label>
+          <div className="flex items-center gap-1">
+            <input
+              ref={inputRef}
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="flex-1 h-9 rounded border border-border bg-bg px-3 text-sm focus:outline-none focus:border-accent"
+              placeholder="my_export"
+            />
+            <span className="text-text-muted text-sm">.mp4</span>
+          </div>
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              className="h-8 px-3 rounded bg-bg-elevated hover:bg-border text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={!valid}
+              className="h-8 px-4 rounded bg-accent hover:bg-accent/80 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Export
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 
@@ -825,6 +916,7 @@ function ClipContextMenu({
   const removeClip = useSplicing((s) => s.removeClip);
 
   const [seconds, setSeconds] = useState<string>(String(lastSpaceSeconds));
+  const [pos, setPos] = useState<{ x: number; y: number }>({ x, y });
   const ref = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -845,6 +937,24 @@ function ClipContextMenu({
     };
   }, [onClose]);
 
+  // Clamp the menu inside the viewport once it's measured. Runs before
+  // paint so the user doesn't see an off-screen flash.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const margin = 8;
+    let nx = x;
+    let ny = y;
+    if (nx + r.width > window.innerWidth - margin) {
+      nx = Math.max(margin, window.innerWidth - r.width - margin);
+    }
+    if (ny + r.height > window.innerHeight - margin) {
+      ny = Math.max(margin, window.innerHeight - r.height - margin);
+    }
+    if (nx !== pos.x || ny !== pos.y) setPos({ x: nx, y: ny });
+  }, [x, y, pos.x, pos.y]);
+
   const idx = timeline.findIndex((c) => c.id === clipId);
   if (idx === -1) return null;
 
@@ -861,7 +971,7 @@ function ClipContextMenu({
   return (
     <div
       ref={ref}
-      style={{ left: x, top: y }}
+      style={{ left: pos.x, top: pos.y }}
       className="fixed z-50 w-56 rounded-md border border-border bg-bg-panel shadow-xl text-sm overflow-hidden"
     >
       <div className="p-2 border-b border-border space-y-1.5">
