@@ -78,6 +78,12 @@ interface SplicingState {
   selectClip: (id: string, additive: boolean) => void;
   clearSelection: () => void;
   removeSelected: () => void;
+
+  /** Wipe library + timeline + selection + playback. Called when the
+   *  active project changes so the splicing tab doesn't show stale items
+   *  from a different workspace. Step 3 will source from the project
+   *  manifest and make this redundant. */
+  clearAll: () => void;
 }
 
 let _idCounter = 0;
@@ -232,6 +238,15 @@ export const useSplicing = create<SplicingState>((set) => ({
         timeline: s.timeline.filter((c) => !sel.has(c.id)),
         selectedIds: [],
       };
+    }),
+
+  clearAll: () =>
+    set({
+      library: [],
+      timeline: [],
+      playhead: 0,
+      isPlaying: false,
+      selectedIds: [],
     }),
 }));
 

@@ -38,6 +38,83 @@ export interface CanonicalPaths {
   mic_wav_exists: boolean;
 }
 
+// ─── Projects (workspace) ──────────────────────────────────────────────────
+
+export interface ProjectSource {
+  path: string;
+  ref_mode: "copied" | "external";
+  original_path: string | null;
+  added_at: string;
+}
+
+export interface ProjectAudioSettings {
+  enhance_speech: "off" | "low" | "medium" | "high";
+  auto_duck: boolean;
+  ducking_db: number;
+}
+
+export interface ProjectAIState {
+  audio: ProjectAudioSettings;
+  overrides: Record<string, string>;
+}
+
+export interface ProjectSpliceClip {
+  kind: "video" | "blank";
+  source_path: string | null;
+  source_start: number;
+  source_end: number;
+  duration: number;
+}
+
+export interface ProjectSpliceState {
+  timeline: ProjectSpliceClip[];
+  last_space_seconds: number;
+}
+
+export interface ProjectRenderHistoryEntry {
+  id: string;
+  type: "ai_render" | "splice_render";
+  source: string | null;
+  input_render_id: string | null;
+  settings: Record<string, unknown>;
+  output: string;
+  label: string;
+  timestamp: string;
+  size_bytes: number | null;
+}
+
+export interface Project {
+  schema_version: number;
+  slug: string;
+  name: string;
+  created_at: string;
+  modified_at: string;
+  sources: ProjectSource[];
+  ai_state: Record<string, ProjectAIState>;
+  splice_state: ProjectSpliceState;
+  render_history: ProjectRenderHistoryEntry[];
+  /** Absolute filesystem path of the project directory. Populated by
+   *  the backend on load — useful for resolving project-relative source
+   *  paths to absolute paths the rest of the API expects. */
+  path: string;
+}
+
+export interface ProjectSummary {
+  slug: string;
+  name: string;
+  created_at?: string;
+  modified_at?: string;
+  source_count?: number;
+  render_count?: number;
+  path: string;
+  broken?: boolean;
+}
+
+export interface ProjectsListResponse {
+  root: string;
+  projects: ProjectSummary[];
+}
+
 export interface AudioPeaks {
   peaks: number[];
   duration: number;

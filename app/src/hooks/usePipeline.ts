@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { api } from "../api/client";
 import { useProject } from "../stores/project";
+import { useActiveProject } from "../stores/activeProject";
 import type { JobEvent, JobStatusResponse } from "../api/types";
 
 /**
@@ -140,6 +141,11 @@ export function usePipeline(mediaPath: string | null) {
             throw new Error("Analyze first.");
           if (!media.pipeline.planPath)
             throw new Error("Build a cut plan first.");
+          // When a project is active, the render lands in <project>/renders/
+          // with an rNNN ID and a render_history entry is appended. We
+          // refresh the active project after success so the new entry is
+          // visible in the UI.
+          const projectSlug = useActiveProject.getState().project?.slug;
           const handle = await api.render({
             analysis_path: media.pipeline.analysisPath,
             plan_path: media.pipeline.planPath,
@@ -148,18 +154,23 @@ export function usePipeline(mediaPath: string | null) {
               auto_duck: media.audio.auto_duck,
               ducking_db: media.audio.ducking_db,
             },
+            project_slug: projectSlug,
           });
           updateMedia(mediaPath, {
             job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
           });
           const job = await waitForJob(handle.job_id, setJobProgress);
-          const renderedPath = (
-            job.result as { rendered_path: string } | null
-          )?.rendered_path;
+          const result = job.result as
+            | { rendered_path: string; project_slug?: string }
+            | null;
+          const renderedPath = result?.rendered_path;
           updateMedia(mediaPath, {
             pipeline: { ...media.pipeline, renderedPath },
             job: null,
           });
+          if (result?.project_slug) {
+            void useActiveProject.getState().open(result.project_slug);
+          }
         }
       } catch (e) {
         updateMedia(mediaPath, {

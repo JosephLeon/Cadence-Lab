@@ -95,6 +95,11 @@ interface ProjectState {
   setOverride: (mediaPath: string, key: string, value: string | null) => void;
   clearOverrides: (mediaPath: string) => void;
   setAudio: (mediaPath: string, patch: Partial<AudioSettings>) => void;
+  /** Wipe all media + playback. Called when the active project changes so
+   *  the AI tab doesn't show stale items from a different workspace.
+   *  Step 3 will make this redundant by sourcing media from the project
+   *  manifest directly. */
+  clearAll: () => void;
 }
 
 export const useProject = create<ProjectState>((set) => ({
@@ -173,4 +178,11 @@ export const useProject = create<ProjectState>((set) => ({
         m.path === mediaPath ? { ...m, audio: { ...m.audio, ...patch } } : m,
       ),
     })),
+
+  clearAll: () =>
+    set({
+      media: [],
+      activeMediaPath: null,
+      playback: { currentTime: 0, duration: 0, isPlaying: false },
+    }),
 }));

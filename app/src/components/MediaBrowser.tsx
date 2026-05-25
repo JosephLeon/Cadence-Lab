@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useProject } from "../stores/project";
-import { MediaAddPanel, type MediaManager } from "./MediaAddPanel";
+import { MediaAddPanel } from "./MediaAddPanel";
 
 function fmtDuration(s: number): string {
   const m = Math.floor(s / 60);
@@ -18,36 +18,10 @@ function fmtBytes(n: number): string {
 export function MediaBrowser() {
   const media = useProject((s) => s.media);
   const active = useProject((s) => s.activeMediaPath);
-  const addMedia = useProject((s) => s.addMedia);
-  const updateMedia = useProject((s) => s.updateMedia);
   const removeMedia = useProject((s) => s.removeMedia);
   const setActive = useProject((s) => s.setActive);
 
   const [dragOver, setDragOver] = useState(false);
-
-  const manager: MediaManager = {
-    add: (path) => addMedia(path),
-    setProbed: (path, probe, p) => {
-      // Derive the mic WAV path: same directory and stem as the source,
-      // with a fixed suffix — matches what paths.mic_wav_path() writes.
-      const stem = path.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
-      const dir = p.analysis.substring(0, p.analysis.lastIndexOf("/"));
-      const micWavPath = `${dir}/${stem}.mic.16k.wav`;
-      updateMedia(path, {
-        probe,
-        canonical: p,
-        status: "ready",
-        pipeline: {
-          analysisPath: p.analysis_exists ? p.analysis : undefined,
-          classifiedPath: p.classified_exists ? p.classified : undefined,
-          planPath: p.plan_exists ? p.plan : undefined,
-          renderedPath: p.rendered_exists ? p.rendered : undefined,
-          micWavPath: p.analysis_exists ? micWavPath : undefined,
-        },
-      });
-    },
-    setError: (path, error) => updateMedia(path, { status: "error", error }),
-  };
 
   return (
     <aside
@@ -71,7 +45,7 @@ export function MediaBrowser() {
         </h2>
       </div>
 
-      <MediaAddPanel manager={manager} />
+      <MediaAddPanel />
 
       {/* Media list */}
       <div className="flex-1 overflow-y-auto">

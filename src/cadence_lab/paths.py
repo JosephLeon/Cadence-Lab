@@ -57,12 +57,51 @@ def output_dir() -> Path:
 
 
 def project_dir(source: Path) -> Path:
-    """Return (and create) the per-source project directory.
-
-    Keyed by the source file's stem — ``recording.mov`` → ``files/recording/``.
-    Used by every per-stage path helper below.
+    """Legacy per-source dir keyed by ``source.stem``. Used as a fallback
+    for sources outside any workspace project and as the home for the
+    rendered MP4 output today (the AI render path hasn't been migrated to
+    the project layout yet — that's step 3).
     """
     out = output_dir() / source.stem
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def artifacts_dir(source: Path) -> Path:
+    """Where intermediate pipeline artifacts (analysis JSON, mic WAV, etc.)
+    live for the given source.
+
+    - **Source inside a project**: ``<project>/artifacts/``. Scoping
+      artifacts to the project avoids the cross-project stem-collision
+      bug where deleting a project leaves stale artifacts in the global
+      cache that get re-matched against unrelated files with the same
+      filename.
+    - **Source outside any project**: legacy ``<output_dir>/<stem>/``.
+    """
+    # Import locally to keep the projects ↔ paths dependency one-way:
+    # projects.py knows nothing about paths.py, and paths.py only depends
+    # on projects.py for the workspace root location.
+    from .projects import projects_root
+
+    try:
+        abs_src = Path(source).expanduser().resolve()
+    except OSError:
+        return project_dir(source)
+
+    try:
+        proj_root = projects_root()
+    except Exception:
+        return project_dir(source)
+
+    try:
+        rel = abs_src.relative_to(proj_root)
+    except ValueError:
+        return project_dir(source)
+
+    # First path component under projects_root is the project slug.
+    if not rel.parts:
+        return project_dir(source)
+    out = proj_root / rel.parts[0] / "artifacts"
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -71,15 +110,15 @@ def project_dir(source: Path) -> Path:
 
 
 def analysis_path(source: Path) -> Path:
-    return project_dir(source) / f"{source.stem}.analysis.json"
+    return artifacts_dir(source) / f"{source.stem}.analysis.json"
 
 
 def classified_path(source: Path) -> Path:
-    return project_dir(source) / f"{source.stem}.classified.json"
+    return artifacts_dir(source) / f"{source.stem}.classified.json"
 
 
 def plan_path(source: Path) -> Path:
-    return project_dir(source) / f"{source.stem}.plan.json"
+    return artifacts_dir(source) / f"{source.stem}.plan.json"
 
 
 def rendered_path(
@@ -111,7 +150,7 @@ def rendered_path(
 
 
 def mic_wav_path(source: Path) -> Path:
-    return project_dir(source) / f"{source.stem}.mic.16k.wav"
+    return artifacts_dir(source) / f"{source.stem}.mic.16k.wav"
 
 
 # ─── Backward-compat: legacy flat-layout lookups ─────────────────────────────

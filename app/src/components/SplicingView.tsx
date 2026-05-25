@@ -8,9 +8,10 @@ import {
   type SpliceClip,
 } from "../stores/splicing";
 import { spliceVideoRef } from "../stores/spliceVideoRef";
+import { useActiveProject } from "../stores/activeProject";
 import { api } from "../api/client";
 import type { JobEvent } from "../api/types";
-import { MediaAddPanel, type MediaManager } from "./MediaAddPanel";
+import { MediaAddPanel } from "./MediaAddPanel";
 
 const DRAG_MIME = "application/x-cadence-splice";
 
@@ -81,16 +82,7 @@ export function SplicingView() {
 
 function MediaList() {
   const library = useSplicing((s) => s.library);
-  const addMedia = useSplicing((s) => s.addMedia);
-  const updateMedia = useSplicing((s) => s.updateMedia);
   const removeMedia = useSplicing((s) => s.removeMedia);
-
-  const manager: MediaManager = {
-    add: (path) => addMedia(path),
-    setProbed: (path, probe, paths) =>
-      updateMedia(path, { probe, canonical: paths, status: "ready" }),
-    setError: (path, error) => updateMedia(path, { status: "error", error }),
-  };
 
   return (
     <aside className="w-72 shrink-0 border-r border-border bg-bg-panel flex flex-col">
@@ -99,7 +91,7 @@ function MediaList() {
           Media
         </h2>
       </div>
-      <MediaAddPanel manager={manager} />
+      <MediaAddPanel />
       <div className="flex-1 overflow-y-auto p-2">
         {library.length === 0 ? (
           <div className="p-4 text-sm text-text-muted text-center">
@@ -323,6 +315,8 @@ function Preview() {
 function ExportButton() {
   const timeline = useSplicing((s) => s.timeline);
   const library = useSplicing((s) => s.library);
+  const activeProject = useActiveProject((s) => s.project);
+  const refreshProject = useActiveProject((s) => s.open);
   const [job, setJob] = useState<
     | { status: "idle" }
     | { status: "naming" }
@@ -359,6 +353,7 @@ function ExportButton() {
         output_name: name,
         target_width: targetWidth,
         target_height: targetHeight,
+        project_slug: activeProject?.slug,
         clips: timeline.map((c) =>
           c.kind === "video"
             ? {
@@ -378,13 +373,18 @@ function ExportButton() {
             void api.getJob(handle.job_id).then((j) => {
               if (j.status === "done") {
                 const r = j.result as
-                  | { output_name?: string; output_path?: string }
+                  | { output_name?: string; output_path?: string; project_slug?: string }
                   | null;
                 setJob({
                   status: "done",
                   outputName: r?.output_name ?? `${name}.mp4`,
                   outputPath: r?.output_path ?? "",
                 });
+                // If the render went into a project, refresh the manifest
+                // so the new render_history entry shows up in the UI.
+                if (r?.project_slug) {
+                  void refreshProject(r.project_slug);
+                }
               } else {
                 setJob({
                   status: "error",
@@ -488,14 +488,11 @@ function ExportNameDialog({
   onConfirm: (name: string) => void;
   onCancel: () => void;
 }) {
-  // Default filename: splice_YYYY-MM-DD-HH-MM-SS, recomputed once per
-  // dialog open.
+  // Default filename: splice_YYYY-MM-DD. Project + render-history give us
+  // versioning, so a date is enough to keep day-over-day exports separate.
   const [name, setName] = useState(() => {
-    const ts = new Date()
-      .toISOString()
-      .replace(/[:T]/g, "-")
-      .slice(0, 19);
-    return `splice_${ts}`;
+    const date = new Date().toISOString().slice(0, 10);
+    return `splice_${date}`;
   });
   const inputRef = useRef<HTMLInputElement | null>(null);
 

@@ -59,6 +59,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -192,6 +193,84 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "cadence-lab"}
+
+
+# ─── Projects ────────────────────────────────────────────────────────────────
+
+
+from . import projects as _projects_mod  # noqa: E402
+
+
+class CreateProjectRequest(BaseModel):
+    name: str
+
+
+class AddSourceRequest(BaseModel):
+    path: str
+    mode: Literal["copy", "reference"] = "copy"
+
+
+@app.get("/projects")
+def list_projects_endpoint() -> dict[str, Any]:
+    """Return every project found under the projects root, newest first.
+
+    Broken projects (no manifest, or unparseable) appear with ``broken=True``
+    so the UI can surface them instead of silently dropping them."""
+    return {
+        "root": str(_projects_mod.projects_root()),
+        "projects": _projects_mod.list_projects(),
+    }
+
+
+@app.post("/projects")
+def create_project_endpoint(req: CreateProjectRequest) -> _projects_mod.Project:
+    try:
+        return _projects_mod.create_project(req.name)
+    except _projects_mod.ProjectError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/projects/{slug}")
+def load_project_endpoint(slug: str) -> _projects_mod.Project:
+    try:
+        return _projects_mod.load_project(slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+    except _projects_mod.ProjectError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/projects/{slug}")
+def save_project_endpoint(
+    slug: str, body: _projects_mod.Project
+) -> _projects_mod.Project:
+    """Replace the project's manifest in full.
+
+    Frontend owns all state — every mutation sends back the whole manifest.
+    We refuse if the body's slug doesn't match the URL slug, so the client
+    can't accidentally rename a project's directory."""
+    if body.slug != slug:
+        raise HTTPException(400, f"slug mismatch: URL={slug}, body={body.slug}")
+    _projects_mod.save_project(body)
+    return body
+
+
+@app.post("/projects/{slug}/sources")
+def add_source_endpoint(
+    slug: str, req: AddSourceRequest
+) -> _projects_mod.Project:
+    """Add a source video to the project. Returns the updated manifest so
+    the frontend can sync state in one round trip."""
+    try:
+        project = _projects_mod.load_project(slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+    try:
+        _projects_mod.add_source(project, Path(req.path), mode=req.mode)
+    except _projects_mod.ProjectError as e:
+        raise HTTPException(400, str(e))
+    _projects_mod.save_project(project)
+    return project
 
 
 class ProbeRequest(BaseModel):
@@ -467,6 +546,9 @@ class RenderRequest(BaseModel):
     encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
     audio_bitrate: str = "192k"
     audio: AudioSettings | None = None
+    # If set, the rendered MP4 is placed under the project's renders/ dir
+    # with an `rNNN` ID prefix, and a render_history entry is appended.
+    project_slug: str | None = None
 
 
 @app.post("/render", response_model=JobHandle)
@@ -494,13 +576,39 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
         if req.audio_track is not None
         else bundle.ingest.mic_track_index
     )
-    out = rendered_path(
-        src,
-        enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
-        auto_duck=(req.audio.auto_duck if req.audio else False),
-        ducking_db=(req.audio.ducking_db if req.audio else -8),
-        source_audio_track_count=len(bundle.ingest.source.audio_tracks),
-    )
+
+    # Output routing: into the active project's renders/ when project_slug is
+    # set, otherwise the legacy stem-keyed path under files/.
+    project: _projects_mod.Project | None = None
+    render_id: str | None = None
+    audio_suffix_parts: list[str] = []
+    if req.audio and req.audio.enhance_speech != "off":
+        audio_suffix_parts.append(f"enhance-{req.audio.enhance_speech}")
+    if (
+        req.audio
+        and req.audio.auto_duck
+        and len(bundle.ingest.source.audio_tracks) > 1
+    ):
+        audio_suffix_parts.append(f"duck{req.audio.ducking_db}")
+    audio_suffix = ("." + ".".join(audio_suffix_parts)) if audio_suffix_parts else ""
+
+    if req.project_slug:
+        try:
+            project = _projects_mod.load_project(req.project_slug)
+        except _projects_mod.ProjectNotFound as e:
+            raise HTTPException(404, f"project not found: {e}")
+        render_id = _projects_mod.next_render_id(project)
+        renders_dir = _projects_mod.project_dir_path(project.slug) / "renders"
+        renders_dir.mkdir(parents=True, exist_ok=True)
+        out = renders_dir / f"{render_id}.{src.stem}.paced{audio_suffix}.mp4"
+    else:
+        out = rendered_path(
+            src,
+            enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
+            auto_duck=(req.audio.auto_duck if req.audio else False),
+            ducking_db=(req.audio.ducking_db if req.audio else -8),
+            source_audio_track_count=len(bundle.ingest.source.audio_tracks),
+        )
 
     job = _new_job("render")
 
@@ -521,11 +629,49 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 source_audio_track_count=len(bundle.ingest.source.audio_tracks),
                 progress=cb,
             )
+            size = out.stat().st_size
+
+            if project and render_id:
+                rel = out.relative_to(
+                    _projects_mod.project_dir_path(project.slug)
+                ).as_posix()
+                # Source path stored relative to the project too, so the
+                # manifest stays portable.
+                proj_root = _projects_mod.project_dir_path(project.slug)
+                try:
+                    source_rel = src.resolve().relative_to(proj_root).as_posix()
+                except ValueError:
+                    source_rel = str(src)
+                project.render_history.append(
+                    _projects_mod.RenderHistoryEntry(
+                        id=render_id,
+                        type="ai_render",
+                        source=source_rel,
+                        input_render_id=None,
+                        settings={
+                            "encoder": req.encoder,
+                            "audio_bitrate": req.audio_bitrate,
+                            "audio": (
+                                req.audio.model_dump() if req.audio else None
+                            ),
+                        },
+                        output=rel,
+                        label=f"AI render · {src.stem}{audio_suffix or ''}",
+                        timestamp=datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"
+                        ),
+                        size_bytes=size,
+                    )
+                )
+                _projects_mod.save_project(project)
+
             job.finish(
                 "done",
                 result={
                     "rendered_path": str(out),
-                    "size_bytes": out.stat().st_size,
+                    "size_bytes": size,
+                    "render_id": render_id,
+                    "project_slug": project.slug if project else None,
                 },
             )
         except (RenderError, Exception) as e:
@@ -556,6 +702,9 @@ class SpliceRequest(BaseModel):
     target_fps: int = 30
     encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
     audio_bitrate: str = "192k"
+    # If set, output is placed under the project's renders/ dir and a
+    # render_history entry is appended to the manifest.
+    project_slug: str | None = None
 
 
 _SAFE_NAME_CHARS = set(
@@ -605,7 +754,22 @@ def splice_render_endpoint(req: SpliceRequest) -> JobHandle:
             specs.append(SpliceClipSpec(kind="blank", duration=c.duration))
 
     safe_name = _sanitize_export_name(req.output_name)
-    out = output_dir() / f"{safe_name}.mp4"
+
+    # Route output: project's renders/ dir if a project is active, otherwise
+    # the legacy files/ directory.
+    project: _projects_mod.Project | None = None
+    render_id: str | None = None
+    if req.project_slug:
+        try:
+            project = _projects_mod.load_project(req.project_slug)
+        except _projects_mod.ProjectNotFound as e:
+            raise HTTPException(404, f"project not found: {e}")
+        render_id = _projects_mod.next_render_id(project)
+        renders_dir = _projects_mod.project_dir_path(project.slug) / "renders"
+        renders_dir.mkdir(parents=True, exist_ok=True)
+        out = renders_dir / f"{render_id}.{safe_name}.mp4"
+    else:
+        out = output_dir() / f"{safe_name}.mp4"
 
     job = _new_job("splice")
 
@@ -623,12 +787,46 @@ def splice_render_endpoint(req: SpliceRequest) -> JobHandle:
                 audio_bitrate=req.audio_bitrate,
                 progress=cb,
             )
+            size = out.stat().st_size
+
+            # Record the render in the project's history so the UI's
+            # Project Files panel + Ask Cadence can see it.
+            if project and render_id:
+                rel = out.relative_to(
+                    _projects_mod.project_dir_path(project.slug)
+                ).as_posix()
+                project.render_history.append(
+                    _projects_mod.RenderHistoryEntry(
+                        id=render_id,
+                        type="splice_render",
+                        source=None,
+                        input_render_id=None,
+                        settings={
+                            "clips": [c.model_dump() for c in req.clips],
+                            "target_width": req.target_width,
+                            "target_height": req.target_height,
+                            "target_fps": req.target_fps,
+                            "encoder": req.encoder,
+                            "audio_bitrate": req.audio_bitrate,
+                        },
+                        output=rel,
+                        label=f"splice · {len(req.clips)} clips",
+                        timestamp=datetime.now(timezone.utc).isoformat(
+                            timespec="seconds"
+                        ),
+                        size_bytes=size,
+                    )
+                )
+                _projects_mod.save_project(project)
+
             job.finish(
                 "done",
                 result={
                     "output_path": str(out),
                     "output_name": out.name,
-                    "size_bytes": out.stat().st_size,
+                    "size_bytes": size,
+                    "render_id": render_id,
+                    "project_slug": project.slug if project else None,
                 },
             )
         except (RenderError, Exception) as e:

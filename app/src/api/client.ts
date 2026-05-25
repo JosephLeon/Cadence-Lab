@@ -8,6 +8,8 @@ import type {
   JobStatusResponse,
   PlanResponse,
   ProbeResponse,
+  Project,
+  ProjectsListResponse,
   ThumbnailSprite,
 } from "./types";
 
@@ -44,6 +46,34 @@ async function jsonFetch<T>(
 export const api = {
   // ─── Sync ──────────────────────────────────────────────────────────────
   health: () => jsonFetch<{ status: string; service: string }>("/health"),
+
+  // ─── Projects ──────────────────────────────────────────────────────────
+  listProjects: () => jsonFetch<ProjectsListResponse>("/projects"),
+
+  createProject: (name: string) =>
+    jsonFetch<Project>("/projects", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  loadProject: (slug: string) =>
+    jsonFetch<Project>(`/projects/${encodeURIComponent(slug)}`),
+
+  /** Replace the full manifest for ``slug``. Server validates schema. */
+  saveProject: (slug: string, project: Project) =>
+    jsonFetch<Project>(`/projects/${encodeURIComponent(slug)}`, {
+      method: "PUT",
+      body: JSON.stringify(project),
+    }),
+
+  addSource: (slug: string, path: string, mode: "copy" | "reference") =>
+    jsonFetch<Project>(
+      `/projects/${encodeURIComponent(slug)}/sources`,
+      {
+        method: "POST",
+        body: JSON.stringify({ path, mode }),
+      },
+    ),
 
   probe: (source_path: string) =>
     jsonFetch<ProbeResponse>("/probe", {
@@ -99,6 +129,9 @@ export const api = {
     target_fps?: number;
     encoder?: "auto" | "h264_videotoolbox" | "libx264";
     audio_bitrate?: string;
+    /** When set, output is written to the project's renders/ dir and a
+     *  render_history entry is appended to its manifest. */
+    project_slug?: string;
   }) =>
     jsonFetch<JobHandle>("/splice/render", {
       method: "POST",
@@ -116,6 +149,10 @@ export const api = {
       auto_duck: boolean;
       ducking_db: number;
     };
+    /** When set, output is written to the project's renders/ dir as
+     *  `rNNN.<stem>.paced[.<audio-suffix>].mp4` and an entry is appended
+     *  to the project's render_history. */
+    project_slug?: string;
   }) =>
     jsonFetch<JobHandle>("/render", {
       method: "POST",

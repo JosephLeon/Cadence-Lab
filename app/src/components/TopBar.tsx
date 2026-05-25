@@ -1,3 +1,6 @@
+import { ProjectSwitcher } from "./ProjectSwitcher";
+import { useActiveProject } from "../stores/activeProject";
+
 export type AppView = "ai" | "splicing";
 
 interface Props {
@@ -7,6 +10,7 @@ interface Props {
 }
 
 export function TopBar({ serverOk, view, onViewChange }: Props) {
+  const hasProject = useActiveProject((s) => s.project !== null);
   return (
     <header className="h-12 shrink-0 border-b border-border flex items-center px-4 gap-3 bg-bg-panel">
       <div className="flex items-center gap-2">
@@ -18,18 +22,22 @@ export function TopBar({ serverOk, view, onViewChange }: Props) {
         <h1 className="font-semibold tracking-tight">Cadence Lab</h1>
       </div>
 
-      <nav className="flex items-center gap-1 ml-4">
-        <TabButton
-          label="AI Processing"
-          active={view === "ai"}
-          onClick={() => onViewChange("ai")}
-        />
-        <TabButton
-          label="Splicing"
-          active={view === "splicing"}
-          onClick={() => onViewChange("splicing")}
-        />
-      </nav>
+      <ProjectSwitcher />
+
+      {hasProject && (
+        <nav className="flex items-center gap-1 ml-2">
+          <TabButton
+            label="AI Processing"
+            active={view === "ai"}
+            onClick={() => onViewChange("ai")}
+          />
+          <TabButton
+            label="Splicing"
+            active={view === "splicing"}
+            onClick={() => onViewChange("splicing")}
+          />
+        </nav>
+      )}
 
       <div className="flex-1" />
 
