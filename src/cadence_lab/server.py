@@ -76,6 +76,7 @@ from .models import (
     ClassificationBundle,
     CutPlan,
     CutPlanParams,
+    KeepSegment,
     SourceProbe,
 )
 from .paths import (
@@ -540,8 +541,19 @@ class AudioSettings(BaseModel):
 
 
 class RenderRequest(BaseModel):
-    analysis_path: str
-    plan_path: str | None = None  # default: derive from output_dir
+    """Render a video. Two modes, distinguished by which path the caller
+    supplies:
+
+    - **Pacing mode** (the AI pipeline output): caller passes ``analysis_path``
+      (and optionally ``plan_path``). The plan's cuts are applied and audio
+      settings, if present, are baked in. This is the existing behavior.
+    - **Audio-only mode**: caller passes ``source_path`` instead. We render
+      the *whole* source — no cuts — with the audio enhancement chain
+      applied. Doesn't require the AI pipeline to have run.
+    """
+    analysis_path: str | None = None
+    plan_path: str | None = None
+    source_path: str | None = None  # audio-only mode
     audio_track: int | None = None
     encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
     audio_bitrate: str = "192k"
@@ -553,32 +565,73 @@ class RenderRequest(BaseModel):
 
 @app.post("/render", response_model=JobHandle)
 def render_endpoint(req: RenderRequest) -> JobHandle:
-    ap = Path(req.analysis_path).expanduser()
-    if not ap.exists():
-        raise HTTPException(404, f"analysis not found: {ap}")
-    bundle = AnalysisBundle.model_validate_json(ap.read_text())
+    # ─── Resolve mode: pacing (analysis + plan) or audio-only (source) ──
+    audio_only = req.source_path is not None and req.analysis_path is None
+    if not audio_only and not req.analysis_path:
+        raise HTTPException(
+            400,
+            "render request needs either analysis_path (pacing mode) or "
+            "source_path (audio-only mode)",
+        )
 
-    pp = (
-        Path(req.plan_path).expanduser()
-        if req.plan_path
-        else plan_path(bundle.ingest.source.path)
-    )
-    if not pp.exists():
-        raise HTTPException(404, f"plan not found: {pp}")
-    plan = CutPlan.model_validate_json(pp.read_text())
+    if audio_only:
+        src = Path(req.source_path or "").expanduser()
+        if not src.exists():
+            raise HTTPException(404, f"source video not found: {src}")
+        # Probe so we know source duration + audio tracks. Cheap (single
+        # ffprobe call) and avoids depending on the AI pipeline.
+        try:
+            source_probe = probe(src)
+        except (IngestError, Exception) as e:
+            raise HTTPException(400, f"probe failed: {e}")
+        audio_track_count = len(source_probe.audio_tracks)
+        # Trivial plan: keep the whole source. The renderer's per-segment
+        # trim + fade machinery still runs but on a single segment, which
+        # is fine — gives us audio enhancement without any cuts.
+        plan = CutPlan(
+            source_duration=source_probe.duration_seconds,
+            output_duration=source_probe.duration_seconds,
+            keeps=[
+                KeepSegment(
+                    source_start=0.0,
+                    source_end=source_probe.duration_seconds,
+                )
+            ],
+            cuts=[],
+            params=CutPlanParams(),
+        )
+        track = (
+            req.audio_track
+            if req.audio_track is not None
+            else 0
+        )
+    else:
+        ap = Path(req.analysis_path or "").expanduser()
+        if not ap.exists():
+            raise HTTPException(404, f"analysis not found: {ap}")
+        bundle = AnalysisBundle.model_validate_json(ap.read_text())
 
-    src = bundle.ingest.source.path
-    if not src.exists():
-        raise HTTPException(404, f"source video not found: {src}")
+        pp = (
+            Path(req.plan_path).expanduser()
+            if req.plan_path
+            else plan_path(bundle.ingest.source.path)
+        )
+        if not pp.exists():
+            raise HTTPException(404, f"plan not found: {pp}")
+        plan = CutPlan.model_validate_json(pp.read_text())
 
-    track = (
-        req.audio_track
-        if req.audio_track is not None
-        else bundle.ingest.mic_track_index
-    )
+        src = bundle.ingest.source.path
+        if not src.exists():
+            raise HTTPException(404, f"source video not found: {src}")
 
-    # Output routing: into the active project's renders/ when project_slug is
-    # set, otherwise the legacy stem-keyed path under files/.
+        audio_track_count = len(bundle.ingest.source.audio_tracks)
+        track = (
+            req.audio_track
+            if req.audio_track is not None
+            else bundle.ingest.mic_track_index
+        )
+
+    # ─── Output routing + filename ───────────────────────────────────────
     project: _projects_mod.Project | None = None
     render_id: str | None = None
     audio_suffix_parts: list[str] = []
@@ -587,10 +640,14 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
     if (
         req.audio
         and req.audio.auto_duck
-        and len(bundle.ingest.source.audio_tracks) > 1
+        and audio_track_count > 1
     ):
         audio_suffix_parts.append(f"duck{req.audio.ducking_db}")
     audio_suffix = ("." + ".".join(audio_suffix_parts)) if audio_suffix_parts else ""
+    # "paced" suffix only appears for pacing mode; audio-only renders are
+    # named `r001.<stem>.enhance-medium.mp4` so the user can tell at a
+    # glance that no AI cuts were applied.
+    mode_suffix = "" if audio_only else ".paced"
 
     if req.project_slug:
         try:
@@ -600,14 +657,14 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
         render_id = _projects_mod.next_render_id(project)
         renders_dir = _projects_mod.project_dir_path(project.slug) / "renders"
         renders_dir.mkdir(parents=True, exist_ok=True)
-        out = renders_dir / f"{render_id}.{src.stem}.paced{audio_suffix}.mp4"
+        out = renders_dir / f"{render_id}.{src.stem}{mode_suffix}{audio_suffix}.mp4"
     else:
         out = rendered_path(
             src,
             enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
             auto_duck=(req.audio.auto_duck if req.audio else False),
             ducking_db=(req.audio.ducking_db if req.audio else -8),
-            source_audio_track_count=len(bundle.ingest.source.audio_tracks),
+            source_audio_track_count=audio_track_count,
         )
 
     job = _new_job("render")
@@ -626,7 +683,7 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
                 auto_duck=(req.audio.auto_duck if req.audio else False),
                 ducking_db=(req.audio.ducking_db if req.audio else -8),
-                source_audio_track_count=len(bundle.ingest.source.audio_tracks),
+                source_audio_track_count=audio_track_count,
                 progress=cb,
             )
             size = out.stat().st_size
@@ -635,13 +692,12 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 rel = out.relative_to(
                     _projects_mod.project_dir_path(project.slug)
                 ).as_posix()
-                # Source path stored relative to the project too, so the
-                # manifest stays portable.
                 proj_root = _projects_mod.project_dir_path(project.slug)
                 try:
                     source_rel = src.resolve().relative_to(proj_root).as_posix()
                 except ValueError:
                     source_rel = str(src)
+                label_prefix = "Audio render" if audio_only else "AI render"
                 project.render_history.append(
                     _projects_mod.RenderHistoryEntry(
                         id=render_id,
@@ -649,6 +705,7 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                         source=source_rel,
                         input_render_id=None,
                         settings={
+                            "mode": "audio_only" if audio_only else "paced",
                             "encoder": req.encoder,
                             "audio_bitrate": req.audio_bitrate,
                             "audio": (
@@ -656,7 +713,7 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                             ),
                         },
                         output=rel,
-                        label=f"AI render · {src.stem}{audio_suffix or ''}",
+                        label=f"{label_prefix} · {src.stem}{audio_suffix or ''}",
                         timestamp=datetime.now(timezone.utc).isoformat(
                             timespec="seconds"
                         ),

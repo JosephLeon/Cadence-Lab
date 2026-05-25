@@ -19,8 +19,12 @@ const isVideoFile = (name: string) =>
 export function MediaAddPanel() {
   const project = useActiveProject((s) => s.project);
   const [pathInput, setPathInput] = useState("");
+  // Multiple files queued at once (e.g. multi-select in the file picker)
+  // share a single modal; the user picks copy/reference once and the same
+  // choice applies to all queued items. New uploads while the modal is
+  // already open get appended to the same queue.
   const [pendingAdd, setPendingAdd] = useState<
-    | { path: string; suggestedMode: "copy" | "reference" }
+    | { paths: string[]; suggestedMode: "copy" | "reference" }
     | null
   >(null);
   const [uploads, setUploads] = useState<Record<string, number>>({});
@@ -29,22 +33,33 @@ export function MediaAddPanel() {
 
   const projectAvailable = !!project;
 
-  /** Submit an absolute path to the project; opens the copy/reference
-   *  prompt for the user to confirm. */
+  /** Append a path to the pending-add queue, opening the modal if needed. */
   const queueAdd = (path: string, suggestedMode: "copy" | "reference") => {
     const trimmed = path.trim();
     if (!trimmed) return;
     setError(null);
-    setPendingAdd({ path: trimmed, suggestedMode });
+    setPendingAdd((prev) => {
+      if (prev) {
+        if (prev.paths.includes(trimmed)) return prev;
+        return { ...prev, paths: [...prev.paths, trimmed] };
+      }
+      return { paths: [trimmed], suggestedMode };
+    });
   };
 
   const performAdd = async (mode: "copy" | "reference") => {
     if (!project || !pendingAdd) return;
     try {
-      const updated = await api.addSource(project.slug, pendingAdd.path, mode);
-      // Server returned the new manifest; push it into the store so the
-      // source-sync effect (and TopBar saving indicator) react immediately.
-      useActiveProject.setState({ project: { ...updated, path: project.path } });
+      // Add sources sequentially: the manifest is small but each call
+      // does a fs copy + JSON write, and we want a clean "latest manifest
+      // wins" order rather than racing PUT/POSTs.
+      let latest = project;
+      for (const p of pendingAdd.paths) {
+        latest = await api.addSource(project.slug, p, mode);
+      }
+      useActiveProject.setState({
+        project: { ...latest, path: project.path },
+      });
       setPendingAdd(null);
       setPathInput("");
     } catch (e) {
@@ -159,7 +174,7 @@ export function MediaAddPanel() {
 
       {pendingAdd && (
         <AddSourceModal
-          path={pendingAdd.path}
+          paths={pendingAdd.paths}
           suggestedMode={pendingAdd.suggestedMode}
           onCancel={() => setPendingAdd(null)}
           onConfirm={performAdd}
@@ -170,18 +185,18 @@ export function MediaAddPanel() {
 }
 
 function AddSourceModal({
-  path,
+  paths,
   suggestedMode,
   onCancel,
   onConfirm,
 }: {
-  path: string;
+  paths: string[];
   suggestedMode: "copy" | "reference";
   onCancel: () => void;
   onConfirm: (mode: "copy" | "reference") => void;
 }) {
   const [mode, setMode] = useState<"copy" | "reference">(suggestedMode);
-  const fileName = path.split("/").pop() ?? path;
+  const count = paths.length;
 
   return (
     <div
@@ -193,11 +208,18 @@ function AddSourceModal({
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="text-base font-semibold text-text-primary mb-1">
-          Add source to project
+          Add {count === 1 ? "source" : `${count} sources`} to project
         </h3>
-        <p className="text-xs text-text-muted truncate mb-4" title={path}>
-          {fileName}
-        </p>
+        <ul
+          className="text-xs text-text-muted mb-4 max-h-24 overflow-y-auto space-y-0.5"
+          title={paths.join("\n")}
+        >
+          {paths.map((p) => (
+            <li key={p} className="truncate">
+              {p.split("/").pop() ?? p}
+            </li>
+          ))}
+        </ul>
 
         <fieldset className="space-y-2">
           <ModeOption

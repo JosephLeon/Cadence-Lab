@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import type { CanonicalPaths, SourceProbe } from "../api/types";
+import { useActiveProject } from "./activeProject";
+import { projectRelativePath } from "../lib/projectPaths";
 
 /**
  * Project state — the in-memory model of what the user is currently editing.
@@ -28,7 +30,7 @@ export type OverrideMap = Record<string, string>;
 
 /** Per-media job state. Only one stage at a time runs against a single clip. */
 export interface JobState {
-  stage: "analyze" | "classify" | "plan" | "render";
+  stage: "analyze" | "classify" | "plan" | "render" | "render_audio";
   jobId?: string;       // undefined for sync stages (plan)
   progress: number;
   message: string;
@@ -87,7 +89,10 @@ interface ProjectState {
   activeMediaPath: string | null;
   playback: PlaybackState;
 
-  addMedia: (path: string) => void;
+  addMedia: (
+    path: string,
+    initial?: { audio?: AudioSettings; overrides?: OverrideMap },
+  ) => void;
   updateMedia: (path: string, patch: Partial<MediaItem>) => void;
   removeMedia: (path: string) => void;
   setActive: (path: string | null) => void;
@@ -102,7 +107,28 @@ interface ProjectState {
   clearAll: () => void;
 }
 
-export const useProject = create<ProjectState>((set) => ({
+/**
+ * Mirror a single source's AI state (audio + overrides) into the active
+ * project's manifest. Called after every per-source mutation so the
+ * manifest stays the source of truth; mutation triggers the debounced
+ * auto-save inside `useActiveProject`.
+ *
+ * No-ops when no project is active (legacy "files/" workflow).
+ */
+function persistSourceAIState(
+  mediaPath: string,
+  audio: AudioSettings,
+  overrides: OverrideMap,
+): void {
+  const project = useActiveProject.getState().project;
+  if (!project) return;
+  const key = projectRelativePath(project, mediaPath);
+  useActiveProject.getState().mutate((p) => {
+    p.ai_state[key] = { audio: { ...audio }, overrides: { ...overrides } };
+  });
+}
+
+export const useProject = create<ProjectState>((set, get) => ({
   media: [],
   activeMediaPath: null,
   playback: { currentTime: 0, duration: 0, isPlaying: false },
@@ -110,7 +136,7 @@ export const useProject = create<ProjectState>((set) => ({
   setPlayback: (patch) =>
     set((s) => ({ playback: { ...s.playback, ...patch } })),
 
-  addMedia: (path) =>
+  addMedia: (path, initial) =>
     set((s) => {
       if (s.media.some((m) => m.path === path)) return s;
       return {
@@ -122,8 +148,10 @@ export const useProject = create<ProjectState>((set) => ({
             status: "loading",
             pipeline: {},
             job: null,
-            overrides: {},
-            audio: { ...DEFAULT_AUDIO_SETTINGS },
+            overrides: initial?.overrides ? { ...initial.overrides } : {},
+            audio: initial?.audio
+              ? { ...DEFAULT_AUDIO_SETTINGS, ...initial.audio }
+              : { ...DEFAULT_AUDIO_SETTINGS },
           },
         ],
         activeMediaPath: s.activeMediaPath ?? path,
@@ -150,7 +178,7 @@ export const useProject = create<ProjectState>((set) => ({
       playback: { currentTime: 0, duration: 0, isPlaying: false },
     }),
 
-  setOverride: (mediaPath, key, value) =>
+  setOverride: (mediaPath, key, value) => {
     set((s) => ({
       media: s.media.map((m) => {
         if (m.path !== mediaPath) return m;
@@ -163,21 +191,30 @@ export const useProject = create<ProjectState>((set) => ({
         }
         return { ...m, overrides: next };
       }),
-    })),
+    }));
+    const m = get().media.find((x) => x.path === mediaPath);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides);
+  },
 
-  clearOverrides: (mediaPath) =>
+  clearOverrides: (mediaPath) => {
     set((s) => ({
       media: s.media.map((m) =>
         m.path === mediaPath ? { ...m, overrides: {} } : m,
       ),
-    })),
+    }));
+    const m = get().media.find((x) => x.path === mediaPath);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides);
+  },
 
-  setAudio: (mediaPath, patch) =>
+  setAudio: (mediaPath, patch) => {
     set((s) => ({
       media: s.media.map((m) =>
         m.path === mediaPath ? { ...m, audio: { ...m.audio, ...patch } } : m,
       ),
-    })),
+    }));
+    const m = get().media.find((x) => x.path === mediaPath);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides);
+  },
 
   clearAll: () =>
     set({

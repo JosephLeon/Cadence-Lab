@@ -1,5 +1,11 @@
 import { create } from "zustand";
-import type { CanonicalPaths, SourceProbe } from "../api/types";
+import type {
+  CanonicalPaths,
+  ProjectSpliceClip,
+  SourceProbe,
+} from "../api/types";
+import { useActiveProject } from "./activeProject";
+import { projectRelativePath } from "../lib/projectPaths";
 
 /**
  * Splicing state — the multi-clip assembly timeline plus its own media
@@ -80,10 +86,17 @@ interface SplicingState {
   removeSelected: () => void;
 
   /** Wipe library + timeline + selection + playback. Called when the
-   *  active project changes so the splicing tab doesn't show stale items
-   *  from a different workspace. Step 3 will source from the project
-   *  manifest and make this redundant. */
+   *  active project changes; the source-sync hook then re-hydrates the
+   *  library from the new project's `sources`. */
   clearAll: () => void;
+
+  /** Replace the current timeline + lastSpaceSeconds with values from a
+   *  project manifest. Called by the source-sync hook after switching or
+   *  refreshing the active project. */
+  hydrateFromProject: (
+    timeline: SpliceClip[],
+    lastSpaceSeconds: number,
+  ) => void;
 }
 
 let _idCounter = 0;
@@ -103,7 +116,71 @@ function loadLastSpace(): number {
   return 5;
 }
 
-export const useSplicing = create<SplicingState>((set) => ({
+/** Convert a frontend SpliceClip into its on-disk manifest form. Absolute
+ *  `sourcePath` values become project-relative when the source lives inside
+ *  the project dir, so the manifest stays portable. */
+function clipToManifest(
+  clip: SpliceClip,
+  pathResolver: (abs: string) => string,
+): ProjectSpliceClip {
+  if (clip.kind === "video") {
+    return {
+      kind: "video",
+      source_path: pathResolver(clip.sourcePath),
+      source_start: clip.sourceStart,
+      source_end: clip.sourceEnd,
+      duration: 0,
+    };
+  }
+  return {
+    kind: "blank",
+    source_path: null,
+    source_start: 0,
+    source_end: 0,
+    duration: clip.duration,
+  };
+}
+
+/** Inverse of `clipToManifest`. Used by `hydrateFromProject`. */
+export function manifestToClip(
+  entry: ProjectSpliceClip,
+  resolveKey: (key: string) => string,
+  resolveSourceDuration: (absPath: string) => number,
+): SpliceClip {
+  if (entry.kind === "video" && entry.source_path) {
+    const abs = resolveKey(entry.source_path);
+    return {
+      kind: "video",
+      id: nextId(),
+      sourcePath: abs,
+      sourceStart: entry.source_start,
+      sourceEnd: entry.source_end,
+      sourceDuration: resolveSourceDuration(abs),
+    };
+  }
+  return {
+    kind: "blank",
+    id: nextId(),
+    duration: entry.duration,
+  };
+}
+
+/** Push the current timeline + lastSpaceSeconds into the active project's
+ *  manifest. No-op when no project is loaded. */
+function persistSpliceState(
+  timeline: SpliceClip[],
+  lastSpaceSeconds: number,
+): void {
+  const project = useActiveProject.getState().project;
+  if (!project) return;
+  const resolver = (abs: string) => projectRelativePath(project, abs);
+  useActiveProject.getState().mutate((p) => {
+    p.splice_state.timeline = timeline.map((c) => clipToManifest(c, resolver));
+    p.splice_state.last_space_seconds = lastSpaceSeconds;
+  });
+}
+
+export const useSplicing = create<SplicingState>((set, get) => ({
   library: [],
   timeline: [],
   playhead: 0,
@@ -138,7 +215,7 @@ export const useSplicing = create<SplicingState>((set) => ({
       };
     }),
 
-  addClip: (sourcePath, sourceDuration, atIndex) =>
+  addClip: (sourcePath, sourceDuration, atIndex) => {
     set((s) => {
       const clip: SpliceClip = {
         kind: "video",
@@ -154,9 +231,12 @@ export const useSplicing = create<SplicingState>((set) => ({
       const next = [...s.timeline];
       next.splice(Math.max(0, atIndex), 0, clip);
       return { timeline: next };
-    }),
+    });
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
 
-  addBlank: (duration, atIndex) =>
+  addBlank: (duration, atIndex) => {
     set((s) => {
       const clip: SpliceClip = {
         kind: "blank",
@@ -166,15 +246,21 @@ export const useSplicing = create<SplicingState>((set) => ({
       const next = [...s.timeline];
       next.splice(Math.max(0, Math.min(atIndex, next.length)), 0, clip);
       return { timeline: next };
-    }),
+    });
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
 
-  removeClip: (id) =>
+  removeClip: (id) => {
     set((s) => ({
       timeline: s.timeline.filter((c) => c.id !== id),
       selectedIds: s.selectedIds.filter((x) => x !== id),
-    })),
+    }));
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
 
-  moveClip: (id, toIndex) =>
+  moveClip: (id, toIndex) => {
     set((s) => {
       const from = s.timeline.findIndex((c) => c.id === id);
       if (from === -1) return s;
@@ -183,9 +269,12 @@ export const useSplicing = create<SplicingState>((set) => ({
       const clampedTo = Math.max(0, Math.min(toIndex, next.length));
       next.splice(clampedTo, 0, clip);
       return { timeline: next };
-    }),
+    });
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
 
-  splitAtPlayhead: () =>
+  splitAtPlayhead: () => {
     set((s) => {
       const at = clipAtPlayhead(s.timeline, s.playhead);
       if (!at) return s;
@@ -205,19 +294,26 @@ export const useSplicing = create<SplicingState>((set) => ({
       const next = [...s.timeline];
       next.splice(at.index, 1, left, right);
       return { timeline: next };
-    }),
+    });
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
 
   setPlayhead: (s) => set({ playhead: Math.max(0, s) }),
   setPlaying: (p) => set({ isPlaying: p }),
 
   setLastSpaceSeconds: (sec) => {
     const v = Math.max(0.1, sec);
+    // Keep the localStorage value too — works as a fallback when no
+    // project is active so the user still gets their last-used default.
     try {
       localStorage.setItem(LAST_SPACE_KEY, String(v));
     } catch {
       /* ignore */
     }
     set({ lastSpaceSeconds: v });
+    const { timeline } = get();
+    persistSpliceState(timeline, v);
   },
 
   selectClip: (id, additive) =>
@@ -230,7 +326,7 @@ export const useSplicing = create<SplicingState>((set) => ({
 
   clearSelection: () => set({ selectedIds: [] }),
 
-  removeSelected: () =>
+  removeSelected: () => {
     set((s) => {
       if (s.selectedIds.length === 0) return s;
       const sel = new Set(s.selectedIds);
@@ -238,12 +334,24 @@ export const useSplicing = create<SplicingState>((set) => ({
         timeline: s.timeline.filter((c) => !sel.has(c.id)),
         selectedIds: [],
       };
-    }),
+    });
+    const { timeline, lastSpaceSeconds } = get();
+    persistSpliceState(timeline, lastSpaceSeconds);
+  },
 
   clearAll: () =>
     set({
       library: [],
       timeline: [],
+      playhead: 0,
+      isPlaying: false,
+      selectedIds: [],
+    }),
+
+  hydrateFromProject: (timeline, lastSpaceSeconds) =>
+    set({
+      timeline,
+      lastSpaceSeconds,
       playhead: 0,
       isPlaying: false,
       selectedIds: [],

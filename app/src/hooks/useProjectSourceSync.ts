@@ -1,9 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { api } from "../api/client";
 import { useActiveProject } from "../stores/activeProject";
 import { useProject } from "../stores/project";
-import { useSplicing } from "../stores/splicing";
-import type { Project, ProjectSource } from "../api/types";
+import { manifestToClip, useSplicing } from "../stores/splicing";
+import type { Project } from "../api/types";
+import {
+  absoluteSourcePath,
+  projectRelativePath,
+  resolveProjectKey,
+} from "../lib/projectPaths";
 
 /**
  * Keep the legacy AI (`useProject.media`) and Splicing (`useSplicing.library`)
@@ -22,17 +27,47 @@ import type { Project, ProjectSource } from "../api/types";
  */
 export function useProjectSourceSync() {
   const project = useActiveProject((s) => s.project);
+  const lastHydratedSlug = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!project) return;
+    if (!project) {
+      lastHydratedSlug.current = null;
+      return;
+    }
     syncStoresWithProject(project);
+
+    // One-shot hydration of the splice timeline per project switch. After
+    // this initial seed, every timeline mutation pushes its own update
+    // back into the manifest via `persistSpliceState`, so re-running on
+    // each refresh would just clobber the user's in-progress edits.
+    if (lastHydratedSlug.current !== project.slug) {
+      lastHydratedSlug.current = project.slug;
+      hydrateSpliceTimeline(project);
+    }
   }, [project]);
 }
 
-/** Resolve a `ProjectSource.path` to an absolute filesystem path. */
-function absoluteSourcePath(project: Project, source: ProjectSource): string {
-  if (source.ref_mode === "external") return source.path;
-  return `${project.path}/${source.path}`;
+function hydrateSpliceTimeline(project: Project) {
+  const resolveKey = (key: string) => resolveProjectKey(project, key);
+  const resolveSourceDuration = (absPath: string): number => {
+    // Best-effort: read from the library if probed already. Falls back to
+    // (end - start) of the manifest entry, which is the visible length;
+    // the sprite thumbnail math degrades gracefully when this is wrong.
+    const match = useSplicing
+      .getState()
+      .library.find((m) => m.path === absPath);
+    return match?.probe?.duration_seconds ?? 0;
+  };
+  const timeline = project.splice_state.timeline.map((entry) => {
+    const clip = manifestToClip(entry, resolveKey, resolveSourceDuration);
+    // Fill in sourceDuration once the source probes complete — handled by
+    // a follow-up effect (TODO when we wire it). For now, an initial
+    // 0-fallback is acceptable for display.
+    return clip;
+  });
+  useSplicing
+    .getState()
+    .hydrateFromProject(timeline, project.splice_state.last_space_seconds);
 }
 
 function syncStoresWithProject(project: Project) {
@@ -42,6 +77,9 @@ function syncStoresWithProject(project: Project) {
   const desiredSet = new Set(desiredAbsPaths);
 
   // ─── useProject (AI tab) ─────────────────────────────────────────────────
+  // Hydrate per-source AI state (audio + overrides) from the project
+  // manifest on add. Existing items aren't touched so an in-flight edit
+  // isn't clobbered by a backend refresh.
   {
     const { media, addMedia, updateMedia, removeMedia } =
       useProject.getState();
@@ -49,7 +87,12 @@ function syncStoresWithProject(project: Project) {
 
     for (const p of desiredAbsPaths) {
       if (!currentPaths.has(p)) {
-        addMedia(p);
+        const key = projectRelativePath(project, p);
+        const aiState = project.ai_state[key];
+        addMedia(p, {
+          audio: aiState?.audio,
+          overrides: aiState?.overrides,
+        });
         void probeIntoAITab(p, updateMedia);
       }
     }

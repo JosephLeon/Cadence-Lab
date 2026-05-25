@@ -139,8 +139,11 @@ export const api = {
     }),
 
   render: (req: {
-    analysis_path: string;
+    /** Pacing mode: pass analysis_path (and optionally plan_path).
+     *  Audio-only mode: pass source_path. Exactly one of the two. */
+    analysis_path?: string;
     plan_path?: string;
+    source_path?: string;
     audio_track?: number;
     encoder?: "auto" | "h264_videotoolbox" | "libx264";
     audio_bitrate?: string;
@@ -150,8 +153,8 @@ export const api = {
       ducking_db: number;
     };
     /** When set, output is written to the project's renders/ dir as
-     *  `rNNN.<stem>.paced[.<audio-suffix>].mp4` and an entry is appended
-     *  to the project's render_history. */
+     *  `rNNN.<stem>[.paced][.<audio-suffix>].mp4` and an entry is
+     *  appended to the project's render_history. */
     project_slug?: string;
   }) =>
     jsonFetch<JobHandle>("/render", {

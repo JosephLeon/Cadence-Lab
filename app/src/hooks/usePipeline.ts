@@ -21,7 +21,7 @@ import type { JobEvent, JobStatusResponse } from "../api/types";
  * around until the next run starts) so the UI can show them inline.
  */
 
-type Stage = "analyze" | "classify" | "plan" | "render";
+type Stage = "analyze" | "classify" | "plan" | "render" | "render_audio";
 
 /**
  * Block on an async job: subscribe to its SSE event stream, mirror progress
@@ -136,26 +136,39 @@ export function usePipeline(mediaPath: string | null) {
             pipeline: { ...media.pipeline, planPath: res.plan_path },
             job: null,
           });
-        } else if (stage === "render") {
-          if (!media.pipeline.analysisPath)
-            throw new Error("Analyze first.");
-          if (!media.pipeline.planPath)
-            throw new Error("Build a cut plan first.");
-          // When a project is active, the render lands in <project>/renders/
-          // with an rNNN ID and a render_history entry is appended. We
-          // refresh the active project after success so the new entry is
-          // visible in the UI.
+        } else if (stage === "render" || stage === "render_audio") {
+          // Pacing render needs analysis + plan. Audio-only render just
+          // needs the source path — explicitly no plan, so the AI cuts
+          // don't get baked in alongside the audio enhancement.
           const projectSlug = useActiveProject.getState().project?.slug;
-          const handle = await api.render({
-            analysis_path: media.pipeline.analysisPath,
-            plan_path: media.pipeline.planPath,
-            audio: {
-              enhance_speech: media.audio.enhance_speech,
-              auto_duck: media.audio.auto_duck,
-              ducking_db: media.audio.ducking_db,
-            },
-            project_slug: projectSlug,
-          });
+          const renderReq: Parameters<typeof api.render>[0] =
+            stage === "render"
+              ? (() => {
+                  if (!media.pipeline.analysisPath)
+                    throw new Error("Analyze first.");
+                  if (!media.pipeline.planPath)
+                    throw new Error("Build a cut plan first.");
+                  return {
+                    analysis_path: media.pipeline.analysisPath,
+                    plan_path: media.pipeline.planPath,
+                    audio: {
+                      enhance_speech: media.audio.enhance_speech,
+                      auto_duck: media.audio.auto_duck,
+                      ducking_db: media.audio.ducking_db,
+                    },
+                    project_slug: projectSlug,
+                  };
+                })()
+              : {
+                  source_path: mediaPath,
+                  audio: {
+                    enhance_speech: media.audio.enhance_speech,
+                    auto_duck: media.audio.auto_duck,
+                    ducking_db: media.audio.ducking_db,
+                  },
+                  project_slug: projectSlug,
+                };
+          const handle = await api.render(renderReq);
           updateMedia(mediaPath, {
             job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
           });

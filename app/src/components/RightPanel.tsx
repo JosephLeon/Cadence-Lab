@@ -8,6 +8,7 @@ import type {
 } from "../stores/project";
 import { useProject } from "../stores/project";
 import { usePipeline } from "../hooks/usePipeline";
+import { ProjectFilesPanel } from "./ProjectFilesPanel";
 
 interface Props {
   onOpenReview: () => void;
@@ -52,29 +53,34 @@ export function RightPanel({ onOpenReview }: Props) {
         <PipelineSection item={item} onRun={runStage} />
       </div>
 
+      {/* Project Files — browse sources and accumulated renders for the
+          active project. Collapsible, starts closed. */}
+      <div className="shrink-0 border-b border-border">
+        <ProjectFilesPanel />
+      </div>
+
       {/* Tabs */}
       <div className="shrink-0 border-b border-border px-3 py-2">
         <Tabs tab={tab} onChange={setTab} />
       </div>
 
-      {/* Tab content (scrolls) */}
+      {/* Tab content (scrolls). Each tab owns its own render action so
+          the two stay independent: audio enhancement no longer pulls in
+          the AI cuts just because a plan happens to exist. */}
       <div className="flex-1 overflow-y-auto p-3 space-y-4 min-h-0">
         {tab === "pacing" ? (
-          <PacingTab item={item} onOpenReview={onOpenReview} />
+          <PacingTab
+            item={item}
+            onOpenReview={onOpenReview}
+            onRender={() => runStage("render")}
+          />
         ) : (
           <AudioTab
             item={item}
             onChange={(patch) => setAudio(item.path, patch)}
+            onRender={() => runStage("render_audio")}
           />
         )}
-      </div>
-
-      {/* Render footer — always visible, commits all settings across all tabs */}
-      <div className="shrink-0 border-t border-border p-3 bg-bg-panel">
-        <RenderFooter
-          item={item}
-          onRender={() => runStage("render")}
-        />
       </div>
     </aside>
   );
@@ -306,9 +312,17 @@ function KV({ label, value }: { label: string; value: string | number }) {
 interface PacingTabProps {
   item: MediaItem;
   onOpenReview: () => void;
+  onRender: () => void;
 }
 
-function PacingTab({ item, onOpenReview }: PacingTabProps) {
+function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
+  const isRendering =
+    item.job?.stage === "render" && !item.job.error;
+  const renderError =
+    item.job?.stage === "render" && item.job.error ? item.job.error : null;
+  const canRender = !!item.pipeline.planPath && !isRendering;
+  const audioOn = item.audio.enhance_speech !== "off" || item.audio.auto_duck;
+
   return (
     <>
       <Section title="Review">
@@ -333,6 +347,49 @@ function PacingTab({ item, onOpenReview }: PacingTabProps) {
         </button>
       </Section>
 
+      <Section title="Render">
+        <p className="text-[10px] text-text-muted px-1 mb-2 leading-snug">
+          Applies the AI cut plan
+          {audioOn
+            ? " and bakes in the audio settings from the Audio tab."
+            : "."}{" "}
+          Produces a new MP4 in the project's renders folder.
+        </p>
+        {isRendering ? (
+          <div className="space-y-1.5 px-1">
+            <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent transition-all duration-200"
+                style={{
+                  width: `${Math.max(2, (item.job?.progress ?? 0) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="text-[10px] text-text-secondary truncate">
+              {item.job?.message || "Rendering…"}
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={onRender}
+            disabled={!canRender}
+            className="w-full h-9 rounded-md bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-bg-elevated text-white text-sm font-medium transition-colors"
+            title={
+              !item.pipeline.planPath
+                ? "Build a cut plan first"
+                : "Render paced MP4"
+            }
+          >
+            ▶ Render paced MP4
+          </button>
+        )}
+        {renderError && (
+          <div className="text-[10px] text-rose-400 px-1" title={renderError}>
+            ✗ {renderError}
+          </div>
+        )}
+      </Section>
+
       <Section title="Output paths">
         <PipelinePaths pipeline={item.pipeline} />
       </Section>
@@ -345,12 +402,21 @@ function PacingTab({ item, onOpenReview }: PacingTabProps) {
 interface AudioTabProps {
   item: MediaItem;
   onChange: (patch: Partial<AudioSettings>) => void;
+  onRender: () => void;
 }
 
-function AudioTab({ item, onChange }: AudioTabProps) {
+function AudioTab({ item, onChange, onRender }: AudioTabProps) {
   const audio = item.audio;
   const audioTrackCount = item.probe?.audio_tracks.length ?? 0;
   const canDuck = audioTrackCount > 1;
+  const isRendering =
+    item.job?.stage === "render_audio" && !item.job.error;
+  const renderError =
+    item.job?.stage === "render_audio" && item.job.error
+      ? item.job.error
+      : null;
+  const audioOn = audio.enhance_speech !== "off" || audio.auto_duck;
+  const canRender = audioOn && !isRendering;
 
   return (
     <>
@@ -404,6 +470,47 @@ function AudioTab({ item, onChange }: AudioTabProps) {
               }
               className="w-full accent-accent"
             />
+          </div>
+        )}
+      </Section>
+
+      <Section title="Render">
+        <p className="text-[10px] text-text-muted px-1 mb-2 leading-snug">
+          Applies just the audio settings — no AI cuts. Produces a new MP4
+          in the project's renders folder. Doesn't require running the
+          pipeline first.
+        </p>
+        {isRendering ? (
+          <div className="space-y-1.5 px-1">
+            <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent transition-all duration-200"
+                style={{
+                  width: `${Math.max(2, (item.job?.progress ?? 0) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="text-[10px] text-text-secondary truncate">
+              {item.job?.message || "Rendering…"}
+            </div>
+          </div>
+        ) : (
+          <button
+            onClick={onRender}
+            disabled={!canRender}
+            className="w-full h-9 rounded-md bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-bg-elevated text-white text-sm font-medium transition-colors"
+            title={
+              audioOn
+                ? "Render audio-enhanced MP4"
+                : "Turn on enhancement or ducking first"
+            }
+          >
+            ▶ Render audio-enhanced MP4
+          </button>
+        )}
+        {renderError && (
+          <div className="text-[10px] text-rose-400 px-1" title={renderError}>
+            ✗ {renderError}
           </div>
         )}
       </Section>
@@ -611,66 +718,3 @@ function PipelinePaths({ pipeline }: { pipeline: PipelineState }) {
   );
 }
 
-// ─── Render footer (persistent) ──────────────────────────────────────────────
-
-interface RenderFooterProps {
-  item: MediaItem;
-  onRender: () => void;
-}
-
-function RenderFooter({ item, onRender }: RenderFooterProps) {
-  const isRendering = item.job?.stage === "render" && !item.job.error;
-  const renderError =
-    item.job?.stage === "render" && item.job.error ? item.job.error : null;
-  const canRender = !!item.pipeline.planPath && !isRendering;
-
-  // Summary line: tell the user what'll be applied if they hit Render now.
-  const summary: string[] = [];
-  if (item.pipeline.planPath) {
-    summary.push("plan ready");
-  } else {
-    summary.push("no plan yet");
-  }
-  if (item.audio.enhance_speech !== "off") {
-    summary.push(`enhance: ${item.audio.enhance_speech}`);
-  }
-  if (item.audio.auto_duck) {
-    summary.push(`duck: ${item.audio.ducking_db}dB`);
-  }
-
-  return (
-    <div className="space-y-2">
-      <div className="text-[10px] text-text-muted truncate" title={summary.join(" · ")}>
-        {summary.join(" · ")}
-      </div>
-
-      {isRendering ? (
-        <div className="space-y-1.5">
-          <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
-            <div
-              className="h-full bg-accent transition-all duration-200"
-              style={{ width: `${Math.max(2, (item.job?.progress ?? 0) * 100)}%` }}
-            />
-          </div>
-          <div className="text-[10px] text-text-secondary truncate">
-            {item.job?.message || "Rendering…"}
-          </div>
-        </div>
-      ) : (
-        <button
-          onClick={onRender}
-          disabled={!canRender}
-          className="w-full h-9 rounded-md bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed disabled:bg-bg-elevated text-white text-sm font-medium transition-colors"
-        >
-          {item.pipeline.renderedPath ? "▶ Re-render MP4" : "▶ Render MP4"}
-        </button>
-      )}
-
-      {renderError && (
-        <div className="text-[10px] text-rose-400" title={renderError}>
-          ✗ {renderError}
-        </div>
-      )}
-    </div>
-  );
-}
