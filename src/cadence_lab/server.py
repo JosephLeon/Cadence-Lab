@@ -81,13 +81,13 @@ from .models import (
 )
 from .paths import (
     analysis_path,
+    cache_dir,
     classified_path,
-    legacy_flat_path,
     mic_wav_path,
     output_dir,
     plan_path,
-    project_dir,
     rendered_path,
+    thumbnail_cache_path,
 )
 from .planner import plan_cuts
 from .renderer import (
@@ -301,39 +301,21 @@ class ProbeResponse(BaseModel):
 
 
 def _canonical_paths(source: Path) -> CanonicalPaths:
-    """Return per-source canonical paths, transparently falling back to the
-    legacy flat layout for any artifact that exists there but not in the
-    new per-source subdir."""
+    """Return per-source canonical paths.
+
+    All artifact paths are project-aware via ``paths.artifacts_dir`` — for
+    sources inside a workspace project, they land in ``<project>/artifacts/``;
+    for sources outside any project, they fall back to ``<output_dir>/<stem>/``.
+
+    The old "legacy flat layout" fallback was removed: it caused ghost
+    artifacts from one project to be reported as belonging to another
+    when two sources happened to share a filename stem.
+    """
     ap = analysis_path(source)
     cp = classified_path(source)
     pp = plan_path(source)
     rp = rendered_path(source)
     mp = mic_wav_path(source)
-
-    # Legacy fallback: if a file exists in the old flat location but not in
-    # the per-source subdir, surface the old path so existing projects keep
-    # working. Users can run `cadence-lab migrate` to move them in-place.
-    if not ap.exists():
-        lf = legacy_flat_path(source, ".analysis.json")
-        if lf.exists():
-            ap = lf
-    if not cp.exists():
-        lf = legacy_flat_path(source, ".classified.json")
-        if lf.exists():
-            cp = lf
-    if not pp.exists():
-        lf = legacy_flat_path(source, ".plan.json")
-        if lf.exists():
-            pp = lf
-    if not rp.exists():
-        lf = legacy_flat_path(source, ".edited.mp4")
-        if lf.exists():
-            rp = lf
-    if not mp.exists():
-        lf = legacy_flat_path(source, ".mic.16k.wav")
-        if lf.exists():
-            mp = lf
-
     return CanonicalPaths(
         analysis=str(ap),
         classified=str(cp),
@@ -1018,10 +1000,13 @@ async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
     """
     if not file.filename:
         raise HTTPException(400, "upload requires a filename")
-    # Treat the upload filename as a synthetic source so project_dir() lands
-    # it in the right per-source subdirectory.
-    pseudo_source = Path(file.filename)
-    dest_dir = project_dir(pseudo_source)
+    # Uploads land in a cache "uploads" dir, NOT in files/. They're a
+    # transient staging spot: the frontend immediately calls
+    # POST /projects/<slug>/sources to copy/reference into the active
+    # project, after which the temp can be cleaned at will. Using cache_dir
+    # also means uploads survive a `rm -rf files/`.
+    dest_dir = cache_dir() / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
     final = dest_dir / file.filename
     tmp = dest_dir / f".{file.filename}.upload"
 
@@ -1167,9 +1152,10 @@ def thumbnails(
     if not src.exists():
         raise HTTPException(404, f"source not found: {src}")
 
-    proj = project_dir(src)
-    sprite = proj / f"{src.stem}.thumbs.{count}x{height}.png"
-    width_meta = proj / f"{src.stem}.thumbs.{count}x{height}.json"
+    # Cache outside of any project dir — sprites are regenerable from the
+    # source video, keyed by sha256 of the absolute source path so two files
+    # with the same basename can't share an entry.
+    sprite, width_meta = thumbnail_cache_path(src, count, height)
 
     with _THUMB_LOCK:
         if not sprite.exists() or not width_meta.exists():
@@ -1216,12 +1202,33 @@ def thumbnails(
             }))
 
     meta = json.loads(width_meta.read_text())
-    # Serve via /files using the relative path under output_dir.
-    rel = sprite.relative_to(output_dir())
+    # Sprite lives under cache_dir/thumbs/<key>.png — served by the
+    # /cache/thumbs/{name} endpoint below.
     return {
-        "url": f"/files/{rel.as_posix()}",
+        "url": f"/cache/thumbs/{sprite.name}",
         **meta,
     }
+
+
+@app.get("/cache/thumbs/{name}")
+def get_cached_thumb(name: str) -> FileResponse:
+    """Serve a cached thumbnail sprite from ``cache_dir()/thumbs/``.
+
+    Filenames in the cache are sha256-derived so the user can't path-
+    traverse out of the directory, but we still resolve + bounds-check
+    defensively in case that assumption ever loosens.
+    """
+    if "/" in name or ".." in name or name.startswith("."):
+        raise HTTPException(400, "bad cache name")
+    base = (cache_dir() / "thumbs").resolve()
+    target = (base / name).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise HTTPException(400, "bad cache name")
+    if not target.exists():
+        raise HTTPException(404, "cache miss")
+    return FileResponse(target)
 
 
 @app.get("/audio-clip")

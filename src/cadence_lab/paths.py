@@ -43,17 +43,56 @@ _ENV_VAR = "CADENCE_OUTPUT_DIR"
 
 
 def output_dir() -> Path:
-    """Return (and create) the *root* output directory.
+    """Legacy output root (``<repo>/files/`` by default).
 
-    Typically you want :func:`project_dir` instead — that returns the per-source
-    subdir where the actual artifacts live. ``output_dir`` is only useful when
-    you need to scan across projects (e.g. for the migration command) or are
-    looking up a file by full path that was already qualified.
+    Used only as a fallback for sources outside any workspace project.
+    All real project data lives under ``projects_root()``; ephemeral caches
+    live under ``cache_dir()``. New code should not write here.
     """
     base_str = os.getenv(_ENV_VAR, "").strip()
     base = Path(base_str).expanduser() if base_str else _DEFAULT_OUTPUT_DIR
     base.mkdir(parents=True, exist_ok=True)
     return base.resolve()
+
+
+# ─── Cache (regenerable, never user data) ────────────────────────────────────
+
+
+_DEFAULT_CACHE_DIR = (
+    Path.home() / "Library" / "Caches" / "CadenceLab"
+)
+_CACHE_ENV_VAR = "CADENCE_CACHE_DIR"
+
+
+def cache_dir() -> Path:
+    """Where regenerable caches live (thumbnails, transient extractions).
+
+    Defaults to ``~/Library/Caches/CadenceLab/`` — the standard macOS cache
+    location, which the OS may auto-clean under disk pressure. Anything in
+    here can be deleted with no data loss; it'll be recomputed on next use.
+    """
+    raw = os.getenv(_CACHE_ENV_VAR, "").strip()
+    base = Path(raw).expanduser() if raw else _DEFAULT_CACHE_DIR
+    base.mkdir(parents=True, exist_ok=True)
+    return base.resolve()
+
+
+def thumbnail_cache_path(source: Path, count: int, height: int) -> tuple[Path, Path]:
+    """Where to cache the thumbnail sprite (and its metadata JSON) for a
+    given source + dimensions. Returns (png_path, json_path).
+
+    Keyed by sha256 of the absolute source path so distinct files with the
+    same basename don't collide — root cause of the ghost-artifact bug that
+    motivated this cache migration.
+    """
+    import hashlib
+
+    abs_src = str(Path(source).expanduser().resolve())
+    digest = hashlib.sha256(abs_src.encode()).hexdigest()[:16]
+    key = f"{digest}.{count}x{height}"
+    thumbs_dir = cache_dir() / "thumbs"
+    thumbs_dir.mkdir(parents=True, exist_ok=True)
+    return thumbs_dir / f"{key}.png", thumbs_dir / f"{key}.json"
 
 
 def project_dir(source: Path) -> Path:
