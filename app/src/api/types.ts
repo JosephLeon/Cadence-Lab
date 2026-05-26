@@ -36,6 +36,10 @@ export interface CanonicalPaths {
   plan_exists: boolean;
   rendered_exists: boolean;
   mic_wav_exists: boolean;
+  events: string;
+  events_exists: boolean;
+  frame_index: string;
+  frame_index_exists: boolean;
 }
 
 // ─── Projects (workspace) ──────────────────────────────────────────────────
@@ -49,13 +53,21 @@ export interface ProjectSource {
 
 export interface ProjectAudioSettings {
   enhance_speech: "off" | "low" | "medium" | "high";
+  enhance_engine: "classical" | "neural";
   auto_duck: boolean;
   ducking_db: number;
+}
+
+export interface ProjectCustomCut {
+  start: number;
+  end: number;
+  reason: string;
 }
 
 export interface ProjectAIState {
   audio: ProjectAudioSettings;
   overrides: Record<string, string>;
+  custom_cuts: ProjectCustomCut[];
 }
 
 export interface ProjectSpliceClip {
@@ -64,6 +76,7 @@ export interface ProjectSpliceClip {
   source_start: number;
   source_end: number;
   duration: number;
+  title?: string | null;
 }
 
 export interface ProjectSpliceState {
@@ -113,6 +126,40 @@ export interface ProjectSummary {
 export interface ProjectsListResponse {
   root: string;
   projects: ProjectSummary[];
+}
+
+// ─── Ask Cadence ──────────────────────────────────────────────────────────
+
+export interface CadenceTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface ProposedAction {
+  type: string;
+  summary: string;
+  params: Record<string, unknown>;
+}
+
+export interface AudioEvent {
+  start: number;
+  end: number;
+  kind: string;
+  confidence: number;
+}
+
+export interface AudioEventBundle {
+  events: AudioEvent[];
+  source_duration: number;
+  model: string;
+  schema_version: number;
+}
+
+export interface CadenceQueryResponse {
+  text: string;
+  actions: ProposedAction[];
+  input_tokens: number;
+  output_tokens: number;
 }
 
 export interface AudioPeaks {

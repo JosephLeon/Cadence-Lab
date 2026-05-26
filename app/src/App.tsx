@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { TopBar, type AppView } from "./components/TopBar";
+import { TopBar } from "./components/TopBar";
+import { useAppView } from "./stores/appView";
 import { MediaBrowser } from "./components/MediaBrowser";
 import { Canvas } from "./components/Canvas";
 import { RightPanel } from "./components/RightPanel";
@@ -7,6 +8,7 @@ import { Timeline } from "./components/Timeline";
 import { ReviewPanel } from "./components/ReviewPanel";
 import { SplicingView } from "./components/SplicingView";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { CadencePanel } from "./components/CadencePanel";
 import { api } from "./api/client";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useActiveProject } from "./stores/activeProject";
@@ -17,7 +19,8 @@ import { useProjectSourceSync } from "./hooks/useProjectSourceSync";
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [view, setView] = useState<AppView>("ai");
+  const view = useAppView((s) => s.view);
+  const setView = useAppView((s) => s.setView);
   useKeyboardShortcuts();
 
   // Try to restore the last-active project on mount. Failure (project was
@@ -110,6 +113,9 @@ export default function App() {
       ) : (
         <SplicingView />
       )}
+      {/* Ask Cadence overlay — renders on top of whichever view is active
+          when the user opens it from the TopBar. Self-gates on project. */}
+      {project && <CadencePanel />}
     </div>
   );
 }

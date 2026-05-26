@@ -7,9 +7,9 @@ const isVideoFile = (name: string) =>
   VIDEO_EXTS.includes(name.split(".").pop()?.toLowerCase() ?? "");
 
 /**
- * "Add media" controls — file picker, path input, and the copy/reference
- * choice that determines whether the source is duplicated into the
- * project's ``sources/`` dir or referenced in place.
+ * "Add media" controls — file picker and the copy/reference choice that
+ * determines whether the source is duplicated into the project's
+ * ``sources/`` dir or referenced in place.
  *
  * All additions go through the active project's ``POST /projects/{slug}/
  * sources`` endpoint. The project store is updated with the returned
@@ -18,7 +18,6 @@ const isVideoFile = (name: string) =>
  */
 export function MediaAddPanel() {
   const project = useActiveProject((s) => s.project);
-  const [pathInput, setPathInput] = useState("");
   // Multiple files queued at once (e.g. multi-select in the file picker)
   // share a single modal; the user picks copy/reference once and the same
   // choice applies to all queued items. New uploads while the modal is
@@ -61,7 +60,6 @@ export function MediaAddPanel() {
         project: { ...latest, path: project.path },
       });
       setPendingAdd(null);
-      setPathInput("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -118,34 +116,6 @@ export function MediaAddPanel() {
         <span className="text-base">＋</span>
         <span>Choose video file…</span>
       </button>
-
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          // Files-already-on-disk default to reference; user can pick
-          // copy in the confirm modal. Keeps users editing big externals
-          // from blowing up project dirs by mistake.
-          queueAdd(pathInput, "reference");
-        }}
-      >
-        <div className="flex gap-2">
-          <input
-            type="text"
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-            placeholder="…or paste a path"
-            disabled={!projectAvailable}
-            className="flex-1 min-w-0 h-8 rounded-md border border-border bg-bg px-2 text-sm placeholder:text-text-muted focus:outline-none focus:border-accent disabled:opacity-40"
-          />
-          <button
-            type="submit"
-            disabled={!projectAvailable || !pathInput.trim()}
-            className="shrink-0 h-8 px-3 rounded-md bg-bg-elevated hover:bg-border text-text-secondary text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            Add
-          </button>
-        </div>
-      </form>
 
       {Object.entries(uploads).map(([name, frac]) => (
         <div key={name} className="px-1">

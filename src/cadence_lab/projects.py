@@ -86,10 +86,26 @@ class AudioSettings(BaseModel):
     ducking_db: int = -8
 
 
+class CustomCut(BaseModel):
+    """An arbitrary time-range cut on a source, outside the classifier's
+    pause/filler taxonomy. Lets the user (or Cadence) cut content the
+    classifier didn't flag — e.g. a mistranscribed vocalization, a misspoken
+    word, or a non-speech sound the audio-event detector doesn't catch yet.
+
+    Stored in source-time seconds. The planner subtracts these ranges from
+    the keep-segments produced by the classifier-derived plan.
+    """
+    start: float
+    end: float
+    reason: str = ""
+
+
 class AIState(BaseModel):
-    """Per-source AI-tab state — sticky audio settings + review overrides."""
+    """Per-source AI-tab state — sticky audio settings + review overrides
+    + user/Cadence-added arbitrary cuts."""
     audio: AudioSettings = Field(default_factory=AudioSettings)
     overrides: dict[str, str] = Field(default_factory=dict)
+    custom_cuts: list[CustomCut] = Field(default_factory=list)
 
 
 class SpliceClipEntry(BaseModel):
@@ -99,6 +115,7 @@ class SpliceClipEntry(BaseModel):
     source_start: float = 0.0
     source_end: float = 0.0
     duration: float = 0.0
+    title: str | None = None  # human-readable label (e.g. Cadence highlights)
 
 
 class SpliceState(BaseModel):
@@ -391,6 +408,52 @@ def resolve_source(project: Project, entry: SourceEntry) -> Path:
     if entry.ref_mode == "copied":
         return (_project_dir(project.slug) / entry.path).resolve()
     return Path(entry.path).expanduser().resolve()
+
+
+def remove_source(
+    project: Project, source_path: str, *, delete_copied_file: bool = False
+) -> bool:
+    """Remove a source entry from the project by its ``path`` field.
+
+    Returns True if a matching entry was found and removed. Also strips
+    any per-source state (``ai_state`` entry, splice timeline clips that
+    referenced it) so the manifest stays consistent.
+
+    When ``delete_copied_file=True`` and the source was copied into the
+    project, the on-disk file under ``sources/`` is unlinked. Externally-
+    referenced sources are never deleted from disk regardless of this
+    flag — they belong to the user, not us.
+    """
+    idx = next(
+        (i for i, s in enumerate(project.sources) if s.path == source_path),
+        None,
+    )
+    if idx is None:
+        return False
+    entry = project.sources[idx]
+    project.sources.pop(idx)
+
+    # AI state keyed by source path: clear it.
+    project.ai_state.pop(source_path, None)
+
+    # Splice timeline: drop any clips that pointed at this source.
+    project.splice_state.timeline = [
+        c
+        for c in project.splice_state.timeline
+        if not (c.kind == "video" and c.source_path == source_path)
+    ]
+
+    if delete_copied_file and entry.ref_mode == "copied":
+        abs_path = (_project_dir(project.slug) / entry.path).resolve()
+        try:
+            abs_path.relative_to(_project_dir(project.slug).resolve())
+            abs_path.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            # Outside project dir or unlink failed — leave it; the manifest
+            # entry is gone either way.
+            pass
+
+    return True
 
 
 # ─── Render IDs ─────────────────────────────────────────────────────────────

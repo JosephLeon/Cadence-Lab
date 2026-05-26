@@ -180,7 +180,9 @@ class ClassificationBundle(BaseModel):
 
 # ─── Stage 4: cut planning ────────────────────────────────────────────────────
 
-CutKind = Literal["pause_cut", "pause_trim", "filler_cut", "retake_cut"]
+CutKind = Literal[
+    "pause_cut", "pause_trim", "filler_cut", "retake_cut", "custom_cut"
+]
 
 
 class KeepSegment(BaseModel):
@@ -249,3 +251,36 @@ class CutPlan(BaseModel):
         if self.source_duration <= 0:
             return 0.0
         return 100.0 * self.time_saved_seconds / self.source_duration
+
+
+# ─── Audio events (sniffles / throat clears / etc) ──────────────────────────
+
+
+AudioEventKind = Literal[
+    "sniff",
+    "throat_clear",
+    "cough",
+    "sneeze",
+    "hiccup",
+    "burp",
+]
+
+
+class AudioEvent(BaseModel):
+    """One non-speech audio event detected by the opt-in event-detection
+    pass. Source-time seconds. ``confidence`` is the model's per-frame
+    max sigmoid probability for the event window."""
+
+    start: float
+    end: float
+    kind: AudioEventKind
+    confidence: float
+
+
+class AudioEventBundle(BaseModel):
+    """Persisted output of an event-detection run; one per source."""
+
+    events: list[AudioEvent]
+    source_duration: float
+    model: str = "panns-cnn14-sed"
+    schema_version: Literal[1] = 1

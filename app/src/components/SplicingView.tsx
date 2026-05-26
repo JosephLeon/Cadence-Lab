@@ -9,6 +9,7 @@ import {
 } from "../stores/splicing";
 import { spliceVideoRef } from "../stores/spliceVideoRef";
 import { useActiveProject } from "../stores/activeProject";
+import { useSpliceNav } from "../stores/spliceNav";
 import { api } from "../api/client";
 import type { JobEvent } from "../api/types";
 import { MediaAddPanel } from "./MediaAddPanel";
@@ -643,6 +644,26 @@ function SpliceTimeline() {
   >(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
 
+  // Scroll-to-end signal: incremented by external surfaces (Ask Cadence
+  // "Open in Splicing →" link) when they want the splice timeline to
+  // focus on the most recent clip. At default zoom a long timeline puts
+  // new clips ~7000+ pixels off-screen — without this the user lands
+  // looking at the start of the timeline with no idea where the new
+  // clip went.
+  const scrollToEndRequests = useSpliceNav((s) => s.scrollToEndRequests);
+  useEffect(() => {
+    if (scrollToEndRequests === 0) return;
+    const strip = stripRef.current;
+    if (!strip) return;
+    // Wait one frame so layout reflects any just-added clip's width.
+    requestAnimationFrame(() => {
+      strip.scrollTo({
+        left: strip.scrollWidth,
+        behavior: "smooth",
+      });
+    });
+  }, [scrollToEndRequests]);
+
   const openContextMenu = (e: React.MouseEvent, clipId: string) => {
     e.preventDefault();
     setContextMenu({ clipId, x: e.clientX, y: e.clientY });
@@ -1139,9 +1160,24 @@ function ClipBlock({
     selectClip(clip.id, e.metaKey || e.ctrlKey);
   };
 
-  const title =
+  // Display logic: prefer the explicit title (Cadence highlights, etc).
+  // Fall back to the source filename. Also surface a [start–end] tag on
+  // sub-range video clips so the user can distinguish "the whole file"
+  // from "a 64s slice of the same file" at a glance.
+  const isSubRange =
+    clip.kind === "video" &&
+    (clip.sourceStart > 0.01 || clip.sourceEnd < clip.sourceDuration - 0.01);
+  const displayName =
     clip.kind === "video"
-      ? `Clip ${index + 1} · ${clip.sourcePath.split("/").pop()} (${fmtDuration(dur)})`
+      ? clip.title?.trim() || (clip.sourcePath.split("/").pop() ?? "video")
+      : "blank";
+  const rangeTag =
+    clip.kind === "video" && isSubRange
+      ? `${fmtDuration(clip.sourceStart)}–${fmtDuration(clip.sourceEnd)}`
+      : null;
+  const tooltipTitle =
+    clip.kind === "video"
+      ? `Clip ${index + 1} · ${displayName}${rangeTag ? ` (source ${rangeTag})` : ""} · ${fmtDuration(dur)}`
       : `Blank · ${fmtDuration(dur)}`;
 
   return (
@@ -1160,21 +1196,23 @@ function ClipBlock({
             : "border-border bg-bg-elevated")
         }
         style={{ width }}
-        title={title}
+        title={tooltipTitle}
       >
         {clip.kind === "video" ? (
           <VideoClipContent clip={clip} width={width} />
         ) : (
           <div className="absolute inset-0 bg-black" />
         )}
-        <div className="absolute inset-x-0 top-0 h-5 bg-black/60 backdrop-blur-sm text-[10px] text-text-secondary px-1.5 flex items-center justify-between pointer-events-none">
+        <div className="absolute inset-x-0 top-0 h-5 bg-black/60 backdrop-blur-sm text-[10px] text-text-secondary px-1.5 flex items-center justify-between pointer-events-none gap-1">
           <span className="truncate">
-            {index + 1}.{" "}
-            {clip.kind === "video"
-              ? clip.sourcePath.split("/").pop()
-              : "blank"}
+            {index + 1}. {displayName}
+            {rangeTag && (
+              <span className="text-text-muted ml-1 font-mono">
+                [{rangeTag}]
+              </span>
+            )}
           </span>
-          <span className="font-mono text-text-muted shrink-0 ml-1">
+          <span className="font-mono text-text-muted shrink-0">
             {fmtDuration(dur)}
           </span>
         </div>

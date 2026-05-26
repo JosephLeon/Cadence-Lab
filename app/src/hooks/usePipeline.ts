@@ -21,7 +21,14 @@ import type { JobEvent, JobStatusResponse } from "../api/types";
  * around until the next run starts) so the UI can show them inline.
  */
 
-type Stage = "analyze" | "classify" | "plan" | "render" | "render_audio";
+type Stage =
+  | "analyze"
+  | "classify"
+  | "plan"
+  | "render"
+  | "render_audio"
+  | "detect_events"
+  | "index_frames";
 
 /**
  * Block on an async job: subscribe to its SSE event stream, mirror progress
@@ -148,6 +155,40 @@ export function usePipeline(mediaPath: string | null) {
             pipeline: { ...after?.pipeline, planPath: res.plan_path },
             job: null,
           });
+        } else if (stage === "index_frames") {
+          // Opt-in: builds a CLIP frame-embedding index for visual
+          // semantic search ("find the walnut table", "find when the
+          // dog is on screen"). Slow first run (downloads ~150MB CLIP
+          // model). Cached per-source in <project>/artifacts.
+          const handle = await api.indexFrames({ source_path: mediaPath });
+          updateMedia(mediaPath, {
+            job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
+          });
+          const job = await waitForJob(handle.job_id, setJobProgress);
+          const frameIndexPath = (
+            job.result as { frame_index_path?: string } | null
+          )?.frame_index_path;
+          const after = latest();
+          updateMedia(mediaPath, {
+            pipeline: { ...after?.pipeline, frameIndexPath },
+            job: null,
+          });
+        } else if (stage === "detect_events") {
+          // Opt-in: scans for non-speech sounds (sniffles, throat clears,
+          // coughs, etc.) so Cadence can offer "remove all sniffles"
+          // style cuts. Slow — runs as a background job with progress.
+          const handle = await api.detectEvents({ source_path: mediaPath });
+          updateMedia(mediaPath, {
+            job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
+          });
+          const job = await waitForJob(handle.job_id, setJobProgress);
+          const eventsPath = (job.result as { events_path: string } | null)
+            ?.events_path;
+          const after = latest();
+          updateMedia(mediaPath, {
+            pipeline: { ...after?.pipeline, eventsPath },
+            job: null,
+          });
         } else if (stage === "render" || stage === "render_audio") {
           const cur = latest();
           if (!cur) return;
@@ -164,9 +205,19 @@ export function usePipeline(mediaPath: string | null) {
                     plan_path: cur.pipeline.planPath,
                     audio: {
                       enhance_speech: cur.audio.enhance_speech,
+                      enhance_engine: cur.audio.enhance_engine,
                       auto_duck: cur.audio.auto_duck,
                       ducking_db: cur.audio.ducking_db,
                     },
+                    // Always send current overrides + custom_cuts so the
+                    // backend re-plans on top of the latest session state.
+                    // Plan is interval algebra — basically free.
+                    overrides: cur.overrides,
+                    custom_cuts: cur.customCuts.map((c) => ({
+                      start: c.start,
+                      end: c.end,
+                      reason: c.reason,
+                    })),
                     project_slug: projectSlug,
                   };
                 })()
@@ -174,6 +225,7 @@ export function usePipeline(mediaPath: string | null) {
                   source_path: mediaPath,
                   audio: {
                     enhance_speech: cur.audio.enhance_speech,
+                    enhance_engine: cur.audio.enhance_engine,
                     auto_duck: cur.audio.auto_duck,
                     ducking_db: cur.audio.ducking_db,
                   },

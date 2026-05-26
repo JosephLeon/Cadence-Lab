@@ -6,8 +6,14 @@ classify every pause and filler word *in context* (not by amplitude), plans
 the cuts as pure interval algebra, lets you review them with per-cut audio
 playback, and renders a YouTube-ready MP4 with hardware-accelerated FFmpeg.
 
+Then **Ask Cadence** — type "remove the um at 1:23", "cut every sniffle",
+"find when the walnut table is on screen", "pull a 60-second highlight from
+the demo segment" — and Claude executes against the same artifacts via
+tool use, proposing actions you accept one click at a time.
+
 Built because every "auto-edit silence" tool I tried was a regex over the
-waveform. This one actually thinks about each pause.
+waveform. This one actually thinks about each pause, and now you can talk
+to it.
 
 > 🎬 _Demo GIF / screenshot goes here — record once the UI is polished_
 
@@ -23,10 +29,11 @@ robotic), removes dramatic pauses that were *intentional*, and treats every
 sentence and start over, an amplitude tool keeps both takes; a human editor
 keeps the second one.
 
-Cadence Lab is structured as a **6-stage pipeline** where the cut decisions
-are made by an LLM that has the full transcript in context. The novel bits
-are not in the FFmpeg or the Whisper integration — those are standard. The
-interesting parts are:
+Cadence Lab is structured as a **typed multi-stage pipeline** where the cut
+decisions are made by an LLM that has the full transcript in context, plus
+an **agentic chat layer** on top where the same LLM can wield read + action
+tools to refine the edit. The novel bits are not in the FFmpeg or the
+Whisper integration — those are standard. The interesting parts are:
 
 - **Pause classification as a 7-way decision, not a boolean.** Each gap gets
   labeled `filler` / `hesitation` / `breath` / `emphasis` / `pre_laughter`
@@ -38,9 +45,16 @@ interesting parts are:
   sees the surrounding words to decide.
 - **Retake detection.** If the speaker says "let me try that again" or
   re-attempts the same sentence twice, the LLM flags the worse take.
-- **Structured outputs via `output_config.format`.** The Claude response is
-  constrained by a JSON schema so there's no regex parsing, no possibility of
-  malformed output — the cut planner consumes typed Pydantic models directly.
+- **Ask Cadence — tool-using Claude over the artifacts.** A separate Claude
+  Opus 4.7 conversation gets read tools (`list_pauses`, `get_transcript_around`,
+  `search_video_content`, `list_audio_events`) and action tools that propose
+  edits (`propose_add_custom_cut`, `propose_set_override`,
+  `propose_create_highlight_clip`, …). Actions return as typed proposals;
+  the user clicks Apply per item. Long-running scans auto-resume the
+  conversation when they finish.
+- **Structured outputs via `output_config.format`.** The Claude classifier
+  is constrained by a JSON schema so there's no regex parsing, no possibility
+  of malformed output — the cut planner consumes typed Pydantic models directly.
 - **Prompt caching on the classifier rubric.** The system prompt is wrapped in
   `cache_control: {"type": "ephemeral"}` so re-running on more videos reads
   the rubric from cache (~0.1× input cost on repeat).
@@ -53,11 +67,25 @@ interesting parts are:
   re-plan instantly. Override decisions flow back through `apply_overrides()`
   → `plan_cuts()` so the same code path serves both the initial plan and the
   refined plan.
+- **Opt-in semantic visual search.** CLIP ViT-B/32 frame embeddings indexed
+  at 1 fps. Ask "find the part where the dog appears" and get ranked
+  timestamps without watching the whole tape.
+- **Opt-in non-speech event detection.** PANNs CNN14 (AudioSet-trained)
+  spots sniffles, throat clears, coughs, sneezes, hiccups, burps. Pair with
+  Ask Cadence's "remove all sniffles" and it proposes a custom cut per
+  detected event.
+- **Neural denoise as an alternative engine.** DeepFilterNet (GRU model
+  trained on ~100k hrs of speech-noise pairs) sits alongside ffmpeg's
+  classical `afftdn`. Significantly better on real-world room noise / fan
+  hum / keyboard clicks; ~real-time on CPU.
+- **Splicing timeline.** Once Cadence has extracted highlight clips into
+  the splice panel, you can rearrange them, drop blank black between, and
+  render an assembled clip — separate code path from pacing-mode render.
 
 If you're building LLM-augmented pipelines and want a reference for
-production-quality choices around structured outputs, prompt caching, multi-stage
-data contracts, and progressive disclosure UI — this is a real working example
-of all of those.
+production-quality choices around structured outputs, prompt caching,
+agentic tool use, multi-stage data contracts, and progressive disclosure
+UI — this is a real working example of all of those.
 
 ---
 
@@ -81,42 +109,65 @@ of all of those.
                   │ per-cut     │       │ FFmpeg       │       │ Interval     │
                   │ audio +     │       │ filter_      │       │ algebra:     │
                   │ accept /    │       │ complex      │       │ classifier   │
-                  │ reject /    │       │ (HW encode   │       │ output →     │
-                  │ re-plan     │       │  by default) │       │ keep-segments│
+                  │ reject /    │       │ (HW encode   │       │ output +     │
+                  │ re-plan     │       │  by default, │       │ custom cuts  │
+                  │             │       │  optional    │       │ + overrides  │
+                  │             │       │  DFN denoise)│       │              │
                   └─────────────┘       └──────────────┘       └──────────────┘
                        ▲                                              │
                        └──────────── re-plan with overrides ◄─────────┘
+
+         ┌────────────────────────── opt-in side branches ──────────────────────────┐
+         │                                                                          │
+         │   Audio events: PANNs CNN14 → sniffle/cough/throat-clear timestamps      │
+         │   Visual search: CLIP ViT-B/32 → frame embeddings (1 fps) → text query   │
+         │   Highlight extract: sub-range → splice timeline → assembled MP4         │
+         │                                                                          │
+         └──────────────────────────────────────────────────────────────────────────┘
+
+         ┌────────────────────────────── Ask Cadence ───────────────────────────────┐
+         │                                                                          │
+         │   Claude Opus 4.7 with read + propose tools. Operates on the artifacts   │
+         │   above. Long-running scans auto-resume the conversation when complete.  │
+         │   User accepts each proposed action explicitly — no silent edits.        │
+         │                                                                          │
+         └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each stage writes a structured JSON file. The next stage reads it. You can
-stop at any stage, edit the JSON by hand if you want, and resume.
+Each pipeline stage writes a structured JSON file. The next stage reads
+it. You can stop at any stage, edit the JSON by hand, and resume.
+
+---
+
+## Project layout on disk
+
+Sources, artifacts, and renders are organized **per project**. The default
+projects root is `~/Cadence Lab Projects/` (override with
+`CADENCE_PROJECTS_DIR`).
 
 ```
-files/                                  ← default output directory (configurable)
-├── recording/                          ← per-source subdir, named after source stem
-│   ├── recording.mov                   ← source (if uploaded; path-input sources stay where they are)
-│   ├── recording.analysis.json         ← stage 2: probe + transcript + VAD
-│   ├── recording.classified.json       ← stage 3: per-pause/filler classifications
-│   ├── recording.plan.json             ← stage 4: keep-segments + audit log
-│   ├── recording.edited.mp4            ← stage 5: the final video
-│   └── recording.mic.16k.wav           ← intermediate: mic-only audio
-└── episode-12/
-    └── ...
+~/Cadence Lab Projects/
+└── my-channel-ep-12/                  ← project (slug = kebab-cased name)
+    ├── project.json                   ← manifest: sources, AI state, render history
+    ├── sources/                       ← copied-mode source videos live here
+    │   └── intro.mov
+    ├── artifacts/                     ← per-source pipeline outputs
+    │   ├── intro.analysis.json        ← stage 2: probe + transcript + VAD
+    │   ├── intro.classified.json      ← stage 3: per-pause/filler classifications
+    │   ├── intro.plan.json            ← stage 4: keep-segments + audit log
+    │   ├── intro.mic.16k.wav          ← intermediate: mic-only audio
+    │   ├── intro.mic.denoised-medium.wav  ← intermediate: DFN output (if neural)
+    │   ├── intro.events.json          ← opt-in: PANNs audio events
+    │   └── intro.frames.npz           ← opt-in: CLIP visual index
+    └── renders/                       ← every rendered MP4 (with rNNN prefix)
+        ├── r001.intro.paced.mp4
+        ├── r002.intro.paced.enhance-medium-neural.mp4
+        └── r003.highlight-3-clips.mp4    ← splice renders
 ```
 
-The output directory is configurable via the `CADENCE_OUTPUT_DIR` environment
-variable in `.env`. Defaults to `./files/` (project-relative) so the tool
-works out of the box. Useful overrides:
-
-- Keep sources on an external drive but outputs on local disk
-- Centralize outputs across many projects in one folder
-
-**Upgrading from an older flat layout:** earlier versions of Cadence Lab
-dropped all artifacts directly into `files/` without subdirectories. Run
-`uv run cadence-lab migrate --dry-run` to see what would move, then
-`uv run cadence-lab migrate` to actually apply. Old flat layouts continue to
-work without migration thanks to a backward-compat fallback in the probe
-endpoint — migrating is a tidiness fix, not a correctness one.
+Reference-mode sources (added via "reference in place" rather than copy)
+stay where they are on disk; only their absolute path lives in the
+manifest.
 
 ---
 
@@ -127,9 +178,10 @@ endpoint — migrating is a tidiness fix, not a correctness one.
 - macOS (Apple Silicon recommended — hardware video encoder) or Linux
 - Python 3.11+
 - `ffmpeg` and `uv` on `PATH`
+- Rust toolchain (for the Tauri shell — first build only)
 
 ```sh
-brew install ffmpeg uv
+brew install ffmpeg uv rustup-init && rustup-init -y
 ```
 
 ### Setup
@@ -144,9 +196,6 @@ cp .env.example .env       # then add your keys
 
 # Frontend + Tauri desktop app
 cd app && bun install && cd ..
-
-# Optional — install Rust if you don't have it (for the Tauri shell)
-# brew install rust
 ```
 
 You need two API keys:
@@ -154,24 +203,22 @@ You need two API keys:
 - **`GROQ_API_KEY`** — for transcription. Whisper-large-v3 hosted by Groq runs
   at ~30× realtime for ~$0.05 per 30 minutes of audio. Get one at
   <https://console.groq.com/keys>.
-- **`ANTHROPIC_API_KEY`** — for Claude Opus 4.7 classification. ~$0.50–$1.50
-  per 30-minute video at default settings. Get one at
+- **`ANTHROPIC_API_KEY`** — for Claude Opus 4.7 (classifier + Ask Cadence).
+  ~$0.50–$2 per 30-minute video depending on how much you chat. Get one at
   <https://console.anthropic.com/settings/keys>.
 
-### Launch
-
-**Desktop app (one command — Tauri spawns everything):**
+### Launch the desktop app
 
 ```sh
 cd app && bun tauri:dev
 ```
 
-Opens a native window. Tauri's `beforeDevCommand` starts the Vite dev server;
-the Rust shell spawns the Python FastAPI sidecar (`uv run cadence-lab server`)
-and kills it on app close. First run takes a few minutes to compile the
-Rust shell; subsequent runs are instant.
+One command. Tauri's `beforeDevCommand` starts the Vite dev server; the
+Rust shell spawns the Python FastAPI sidecar (`uv run cadence-lab server`)
+on `localhost:27182` and tears it down on app close. First run takes a
+few minutes to compile the Rust shell; subsequent runs are instant.
 
-**Dev mode without Tauri (still useful for frontend-only iteration):**
+### Or run the pieces separately (frontend-only iteration)
 
 ```sh
 # Terminal 1 — Python sidecar (FastAPI)
@@ -184,26 +231,16 @@ cd app && bun dev
 Open <http://localhost:1420>. Same UI, in a browser tab instead of a
 native window.
 
-**Legacy Streamlit UI** (still works, being phased out):
-
-```sh
-uv run cadence-lab ui
-```
-
-Opens at <http://localhost:8501>. Drop a video in, walk through sections 1–11.
-Already have JSON artifacts from a previous run? Use the **"Resume from JSON"**
-tab in section 1 to skip straight to the stage you left off at.
-
 ### Or use the CLI
 
-Each stage is a separate subcommand; they're chained by JSON output.
+Each pipeline stage is a separate subcommand; they're chained by JSON output.
 
 ```sh
-uv run cadence-lab probe   recording.mov                    # list audio tracks
-uv run cadence-lab analyze recording.mov                    # → analysis.json
-uv run cadence-lab classify recording.analysis.json         # → classified.json
-uv run cadence-lab plan    recording.analysis.json          # → plan.json
-uv run cadence-lab render  recording.analysis.json          # → edited.mp4
+uv run cadence-lab probe    recording.mov                    # list audio tracks
+uv run cadence-lab analyze  recording.mov                    # → analysis.json
+uv run cadence-lab classify recording.analysis.json          # → classified.json
+uv run cadence-lab plan     recording.analysis.json          # → plan.json
+uv run cadence-lab render   recording.analysis.json          # → edited.mp4
 ```
 
 The `render` command uses hardware encoding by default on Apple Silicon
@@ -267,12 +304,12 @@ The output is per-pause `{category, action, reason}`, per-filler
 ### Stage 4 — Cut planner ([`planner.py`](src/cadence_lab/planner.py))
 
 **Pure interval algebra, no API, no video touched.** Each classifier "cut" or
-"trim" decision contributes one or more removal intervals; the planner merges
-overlapping intervals, takes the complement in `[0, duration]` to get
-keep-segments, drops slivers shorter than `min_keep_ms`. The original cut-op
-list is preserved as an audit log so the review UI can show the *original
-intent* even after merging (e.g. a retake that swallowed three filler cuts
-within it).
+"trim" decision contributes one or more removal intervals; user/AI-added
+**custom cuts** are merged in alongside. The planner merges overlapping
+intervals, takes the complement in `[0, duration]` to get keep-segments,
+drops slivers shorter than `min_keep_ms`. The original cut-op list is
+preserved as an audit log so the review UI can show the *original intent*
+even after merging (e.g. a retake that swallowed three filler cuts within it).
 
 ### Stage 5 — Renderer ([`renderer.py`](src/cadence_lab/renderer.py))
 
@@ -288,18 +325,72 @@ encoder) at `-q:v 65 -realtime 0 -prio_speed 0 -profile:v high`, else falls
 back to libx264. Pass `encoder="libx264"` explicitly to force the slow CPU
 encode for an archival master.
 
-### Stage 6 — Review UI ([`reviewer.py`](src/cadence_lab/reviewer.py) + Streamlit section 9)
+Audio enhancement supports two engines:
 
-For each classifier decision, a row with:
-- Timestamp + duration
-- Transcript context (`±6` words around the cut)
-- Inline MP3 clip extracted lazily from the mic WAV (cached)
-- Radio buttons for the override action
+- **Classical** (default): ffmpeg `afftdn` spectral denoise + loudnorm to
+  -14 LUFS. Real-time on any CPU, decent for low hum / static.
+- **Neural** ([`denoise.py`](src/cadence_lab/denoise.py)): DeepFilterNet
+  runs as a pre-pass on the mic WAV; cleaned output is fed to ffmpeg as a
+  second input and substituted for the source's mic track in the filter
+  graph. The denoised WAV is cached per-strength so re-rendering is free.
 
-User overrides are stored as `{(kind, source_id): override_value}` in
-session state. Clicking "Apply changes" runs `apply_overrides()` on the
-classification, then `plan_cuts()` on the modified version — pure functional
-flow, no mutation of the original artifacts.
+### Stage 6 — Review UI
+
+Per-classifier-item rows in the right panel. Each row has timestamp,
+duration, transcript context (`±6` words around the cut), an inline MP3
+clip extracted lazily from the mic WAV (cached), and a one-click override.
+Overrides apply through `apply_overrides()` → `plan_cuts()` on render, so
+the same code path serves both the initial plan and the refined plan.
+
+### Ask Cadence ([`cadence.py`](src/cadence_lab/cadence.py))
+
+A separate Claude Opus 4.7 conversation with two tool families:
+
+- **Read tools** — `list_pauses`, `list_fillers`, `get_transcript_around`,
+  `get_classification_summary`, `get_full_transcript`, `search_video_content`,
+  `list_audio_events`. These query the existing artifacts; no model calls
+  fan out from them.
+- **Action tools** — `propose_set_override`, `propose_clear_override`,
+  `propose_add_custom_cut`, `propose_create_highlight_clip`,
+  `propose_set_audio_setting`, `propose_run_audio_event_scan`,
+  `propose_run_visual_index`. Each returns a typed `ProposedAction` to
+  the frontend; the user clicks Apply per item before anything mutates.
+
+When a `propose_run_*_scan` action is applied, the user's last message is
+captured. When the (slow) scan finishes, the system synthesizes a follow-up
+message — `"(Scan complete — N events found.) Continue with the previous
+request: …"` — and Cadence picks up the conversation without the user
+having to retype.
+
+### Audio events ([`events.py`](src/cadence_lab/events.py))
+
+PANNs CNN14 (Sound Event Detection model, AudioSet-trained, ~320 MB
+checkpoint downloaded on first use). Runs on the mic WAV. Class IDs are
+resolved by name at runtime from the canonical AudioSet labels CSV
+(fetched from upstream on first run, then cached). Tracked classes:
+cough, throat-clear, sneeze, sniff, burp, hiccup. Output is cached as
+`<source>.events.json` so subsequent reads are free.
+
+### Visual search ([`vision.py`](src/cadence_lab/vision.py))
+
+`open_clip` ViT-B/32 (OpenAI weights, ~150 MB on first download).
+Indexing extracts one frame per second via ffmpeg pipe, encodes each
+through CLIP, L2-normalizes, and persists `(timestamps, embeddings)`
+as a single `.npz`. A 30-minute video ≈ 1,800 frames × 512 dims × float32
+≈ 3.6 MB.
+
+At query time: encode the text with the same CLIP, take a cosine
+similarity vector against the cached embeddings, sort, then merge
+adjacent matches within ±4 s (you want "where in the video" not
+"every frame where").
+
+### Splicing render ([`renderer.py:splice_render`](src/cadence_lab/renderer.py))
+
+A separate top-level render path. Takes a list of `SpliceClipSpec`
+(either `kind="video"` with a source path + sub-range, or `kind="blank"`
+for synthesized black + silence) and assembles a single MP4. Every input
+is normalized to the target geometry (1920×1080 @ 30 fps + stereo 48 k
+audio) before concat, so mismatched sources combine cleanly.
 
 ---
 
@@ -313,10 +404,14 @@ At default settings, end-to-end for a 30-minute source video:
 | 3 — Classification | Claude Opus 4.7, ~25 K input + ~10 K output tokens | $0.50–$1.50 |
 | 4 — Planning | Local CPU | $0 |
 | 5 — Render | Local CPU/GPU | $0 |
-| **Total** | | **~$0.55–$1.55** |
+| Ask Cadence | Claude Opus 4.7, ~10–30 K tokens per chat turn (cached aggressively) | $0.05–$0.50 per session |
+| Audio events | Local CPU (PANNs CNN14) | $0 |
+| Visual search | Local CPU (CLIP ViT-B/32) | $0 |
+| Neural denoise | Local CPU (DeepFilterNet) | $0 |
+| **Typical total** | | **~$0.60–$2.00** |
 
-The local backend (`faster-whisper`) is offline + free but ~5–10× slower than
-Groq; useful if you don't want audio leaving your machine.
+The local Whisper backend (`faster-whisper`) is offline + free but ~5–10×
+slower than Groq; useful if you don't want audio leaving your machine.
 
 ---
 
@@ -324,31 +419,40 @@ Groq; useful if you don't want audio leaving your machine.
 
 ```
 src/cadence_lab/
-├── cli.py        # typer CLI: probe / analyze / classify / plan / render / ui
-├── ui.py         # streamlit app (11 sections, full pipeline + review)
+├── cli.py        # typer CLI: probe / analyze / classify / plan / render / server
+├── server.py     # FastAPI sidecar — all endpoints the Tauri app talks to
 ├── ingest.py     # ffprobe + ffmpeg mic-track extraction
 ├── speech.py     # Silero VAD + transcription dispatch
 ├── backends.py   # Groq + local (faster-whisper) backends, with chunking
 ├── classifier.py # pause / filler / retake classifier (Claude Opus 4.7)
 ├── planner.py    # interval algebra → CutPlan (no API, no video)
-├── renderer.py   # FFmpeg filter_complex (videotoolbox or libx264)
+├── renderer.py   # FFmpeg filter_complex (videotoolbox or libx264) + splice render
 ├── reviewer.py   # apply_overrides() + per-cut audio clip extraction
-├── paths.py      # output_dir() + per-stage path helpers (one source of truth)
+├── cadence.py    # Ask Cadence — Claude tool-use loop + propose-action contract
+├── events.py     # PANNs CNN14 audio event detection (opt-in)
+├── vision.py     # open_clip frame indexing + text query (opt-in)
+├── denoise.py    # DeepFilterNet neural denoise (opt-in alternative engine)
+├── projects.py   # per-project manifest + sources + render history
+├── paths.py      # canonical paths for every artifact (one source of truth)
 ├── models.py     # pydantic data models (the JSON contract)
 └── __init__.py
+
+app/                         # Tauri desktop app
+├── src-tauri/               # Rust shell — spawns the sidecar, hosts the webview
+└── src/
+    ├── App.tsx              # top-level layout + view routing
+    ├── components/          # MediaBrowser / Canvas / RightPanel / Timeline /
+    │                        # CadencePanel / ReviewPanel / SplicingView / …
+    ├── stores/              # Zustand stores (project, splicing, cadence, …)
+    ├── hooks/               # usePipeline, useProjectSourceSync, …
+    ├── api/                 # typed fetch client for the sidecar
+    └── lib/                 # projectDigest (Cadence context), applyCadenceAction
 ```
 
 ---
 
 ## What's deferred (and why)
 
-A few things in the original architecture sketch that I haven't built:
-
-- **Screen-change snapping.** The plan was: sample frames every ~250 ms,
-  detect "screen change moments" via perceptual hash, snap each keep-segment
-  boundary to the nearest one within ±500 ms so cuts feel intentional. Worth
-  doing for screen-recording content. Currently cuts land on word-aligned
-  positions which is already pretty clean.
 - **Style-profile aggregation.** The review UI's accept/reject decisions die
   with the session today. The architecture called for these to feed a
   per-channel style profile over time. Useful once you've reviewed enough
@@ -358,23 +462,37 @@ A few things in the original architecture sketch that I haven't built:
   encode by default, the speedup isn't worth the complexity.
 - **Bulk operations in review.** Currently you reject cuts one at a time.
   "Reject all filler cuts under 400 ms" type operations would be useful once
-  you have 200+ cuts to review.
+  you have 200+ cuts to review — and Ask Cadence already covers a chunk of
+  this informally.
+- **MPS / CUDA acceleration for CLIP + DFN.** Both currently run on CPU
+  for portability. Apple's MPS backend would help; deferred until the
+  rest is stable.
 
 ---
 
 ## Tech stack
 
+### Backend
 - **Python 3.11+**, [`uv`](https://github.com/astral-sh/uv) for dependencies
 - **[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python)** — Claude Opus 4.7
   with adaptive thinking, structured outputs via `output_config.format`,
-  prompt caching
+  prompt caching, tool use loop
 - **[Groq SDK](https://github.com/groq/groq-python)** — hosted whisper-large-v3
 - **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** — local fallback transcription
 - **[silero-vad](https://github.com/snakers4/silero-vad)** — voice activity detection
+- **[panns-inference](https://github.com/qiuqiangkong/panns_inference)** — audio event detection
+- **[open-clip-torch](https://github.com/mlfoundations/open_clip)** — CLIP frame embeddings
+- **[DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)** — neural speech denoise
 - **[FFmpeg](https://ffmpeg.org/)** — all media manipulation; `h264_videotoolbox` or `libx264`
-- **[Pydantic](https://docs.pydantic.dev/)** v2 — typed data models for the JSON contracts
+- **[FastAPI](https://fastapi.tiangolo.com/)** + **[Pydantic](https://docs.pydantic.dev/) v2** — sidecar HTTP + typed JSON contracts
 - **[Typer](https://typer.tiangolo.com/)** — CLI
-- **[Streamlit](https://streamlit.io/)** — admin / review UI (custom dark theme + CSS polish)
+
+### Frontend
+- **[Tauri 2](https://v2.tauri.app/)** — native shell (Rust + WKWebView), spawns the Python sidecar
+- **React 19 + TypeScript + Vite** — UI
+- **[Zustand](https://github.com/pmndrs/zustand)** — state, with write-through persistence to `project.json`
+- **[TanStack Query](https://tanstack.com/query)** — async data + caching
+- **Tailwind** — styling
 
 ---
 

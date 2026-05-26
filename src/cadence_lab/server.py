@@ -72,6 +72,8 @@ from .classifier import classify as run_classify
 from .ingest import IngestError, ingest, probe
 from .models import (
     AnalysisBundle,
+    AudioEvent,
+    AudioEventBundle,
     Classification,
     ClassificationBundle,
     CutPlan,
@@ -83,6 +85,9 @@ from .paths import (
     analysis_path,
     cache_dir,
     classified_path,
+    denoised_wav_path,
+    events_path,
+    frame_index_path,
     mic_wav_path,
     output_dir,
     plan_path,
@@ -111,7 +116,9 @@ class Job:
     """One async pipeline run. Thread-safe via the GIL for our simple usage."""
 
     id: str
-    kind: Literal["analyze", "classify", "render", "splice"]
+    kind: Literal[
+    "analyze", "classify", "render", "splice", "detect_events", "index_frames"
+]
     status: JobStatus = "pending"
     progress: float = 0.0
     message: str = ""
@@ -148,7 +155,9 @@ _jobs: dict[str, Job] = {}
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cadence-job")
 
 
-def _new_job(kind: Literal["analyze", "classify", "render", "splice"]) -> Job:
+def _new_job(kind: Literal[
+    "analyze", "classify", "render", "splice", "detect_events", "index_frames"
+]) -> Job:
     job = Job(id=str(uuid.uuid4()), kind=kind)
     _jobs[job.id] = job
     return job
@@ -269,6 +278,30 @@ def delete_project_endpoint(slug: str) -> dict[str, str]:
     return {"status": "deleted", "slug": slug}
 
 
+@app.delete("/projects/{slug}/sources")
+def remove_source_endpoint(
+    slug: str,
+    path: str = Query(..., description="The source's `path` field as stored in the manifest"),
+    delete_file: bool = Query(False, description="If True and the source was copied, also unlink the file under sources/"),
+) -> _projects_mod.Project:
+    """Remove a source from a project. Returns the updated manifest so the
+    frontend can sync state in one round trip — same pattern as the add
+    endpoint."""
+    try:
+        project = _projects_mod.load_project(slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+    removed = _projects_mod.remove_source(
+        project, path, delete_copied_file=delete_file
+    )
+    if not removed:
+        raise HTTPException(
+            404, f"no source with path={path!r} in project {slug}"
+        )
+    _projects_mod.save_project(project)
+    return project
+
+
 @app.post("/projects/{slug}/sources")
 def add_source_endpoint(
     slug: str, req: AddSourceRequest
@@ -301,11 +334,15 @@ class CanonicalPaths(BaseModel):
     plan: str
     rendered: str
     mic_wav: str
+    events: str
+    frame_index: str
     analysis_exists: bool
     classified_exists: bool
     plan_exists: bool
     rendered_exists: bool
     mic_wav_exists: bool
+    events_exists: bool
+    frame_index_exists: bool
 
 
 class ProbeResponse(BaseModel):
@@ -329,17 +366,23 @@ def _canonical_paths(source: Path) -> CanonicalPaths:
     pp = plan_path(source)
     rp = rendered_path(source)
     mp = mic_wav_path(source)
+    ep = events_path(source)
+    fp = frame_index_path(source)
     return CanonicalPaths(
         analysis=str(ap),
         classified=str(cp),
         plan=str(pp),
         rendered=str(rp),
         mic_wav=str(mp),
+        events=str(ep),
+        frame_index=str(fp),
         analysis_exists=ap.exists(),
         classified_exists=cp.exists(),
         plan_exists=pp.exists(),
         rendered_exists=rp.exists(),
         mic_wav_exists=mp.exists(),
+        events_exists=ep.exists(),
+        frame_index_exists=fp.exists(),
     )
 
 
@@ -357,6 +400,12 @@ def probe_endpoint(req: ProbeRequest) -> ProbeResponse:
         raise HTTPException(400, str(e)) from e
 
 
+class CustomCutInput(BaseModel):
+    start: float
+    end: float
+    reason: str = ""
+
+
 class PlanRequest(BaseModel):
     analysis_path: str
     classified_path: str | None = None  # default: derive from output_dir
@@ -364,6 +413,9 @@ class PlanRequest(BaseModel):
     # "pause:5" → "keep" | "trim" | "cut", "filler:3" → "keep" | "cut",
     # "retake:0" → "reject". Used by the review panel for re-plans.
     overrides: dict[str, str] | None = None
+    # Arbitrary cuts the user or Cadence added on top of classifier cuts.
+    # Source-time seconds. Merged with classifier cuts before complement.
+    custom_cuts: list[CustomCutInput] | None = None
     crossfade_ms: int = 20
     filler_pad_ms: int = 20
     default_breath_ms: int = 150
@@ -399,6 +451,11 @@ def plan_endpoint(req: PlanRequest) -> PlanResponse:
         modified = apply_overrides(cls_bundle.classification, parsed)  # type: ignore[arg-type]
         cls_bundle = cls_bundle.model_copy(update={"classification": modified})
 
+    custom_cuts_tuples = (
+        [(c.start, c.end, c.reason) for c in req.custom_cuts]
+        if req.custom_cuts
+        else None
+    )
     plan = plan_cuts(
         speech=bundle.speech,
         classification_bundle=cls_bundle,
@@ -408,6 +465,7 @@ def plan_endpoint(req: PlanRequest) -> PlanResponse:
             default_breath_ms=req.default_breath_ms,
             min_keep_ms=req.min_keep_ms,
         ),
+        custom_cuts=custom_cuts_tuples,
     )
 
     # Persist alongside the analysis so the next stage finds it.
@@ -523,7 +581,159 @@ def classify_endpoint(req: ClassifyRequest) -> JobHandle:
     return JobHandle(job_id=job.id)
 
 
+# ─── Audio-event detection (opt-in pipeline stage) ──────────────────────────
+
+
+class DetectEventsRequest(BaseModel):
+    """Run sniff/throat-clear/cough/etc detection on a source.
+
+    Separate from `/analyze` because it's slow (PANNs CNN14 SED runs at
+    roughly real-time on CPU) and most users never need it. Output is
+    cached to ``<source>.events.json`` so subsequent reads are free."""
+    source_path: str
+    mic_track: int | None = None  # currently unused (we read the mic WAV)
+
+
+@app.post("/detect-events", response_model=JobHandle)
+def detect_events_endpoint(req: DetectEventsRequest) -> JobHandle:
+    """Kick off the audio-event detection background job.
+
+    Requires the mic WAV to exist (which it will if Analyze has run).
+    If not, the job extracts the mic audio on the fly — same path as
+    `/audio-peaks`.
+    """
+    src = Path(req.source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+
+    job = _new_job("detect_events")
+
+    def run() -> None:
+        try:
+            job.status = "running"
+            cb = _progress_for(job)
+            cb(0.0, "Preparing audio…")
+            # Reuse the audio-peaks decoder so video sources auto-extract
+            # mic audio to the canonical cached path.
+            audio_input = _ensure_decodable_audio(src)
+            from .events import detect_events
+
+            events = detect_events(audio_input, progress=cb)
+
+            # Get duration from the WAV header for the bundle.
+            import soundfile as sf
+
+            with sf.SoundFile(str(audio_input)) as f:
+                duration = len(f) / float(f.samplerate)
+
+            bundle = AudioEventBundle(
+                events=events,
+                source_duration=duration,
+            )
+            out = events_path(src)
+            out.write_text(
+                json.dumps(bundle.model_dump(mode="json"), indent=2)
+            )
+            job.finish(
+                "done",
+                result={
+                    "events_path": str(out),
+                    "event_count": len(events),
+                },
+            )
+        except Exception as e:
+            job.finish("error", error=str(e))
+
+    _executor.submit(run)
+    return JobHandle(job_id=job.id)
+
+
+@app.get("/events", response_model=AudioEventBundle)
+def get_events(path: str = Query(..., description="Absolute path to source video")) -> AudioEventBundle:
+    """Return the cached audio-event detection output for a source.
+
+    Used by Cadence's `list_audio_events` tool to read the cached scan
+    result. 404 if the scan hasn't been run for this source yet — the
+    frontend can use that signal to surface the "Detect audio events"
+    button or for Cadence to propose running the scan.
+    """
+    src = Path(path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+    ep = events_path(src)
+    if not ep.exists():
+        raise HTTPException(404, f"no events file at {ep}")
+    return AudioEventBundle.model_validate_json(ep.read_text())
+
+
+# ─── Semantic visual search (opt-in pipeline stage) ─────────────────────────
+
+
+class IndexFramesRequest(BaseModel):
+    """Build a CLIP frame-embedding index for a source so Cadence can
+    answer 'find the part where X is on screen' queries. Slow and opt-in
+    — runs as a background job."""
+    source_path: str
+
+
+@app.post("/index-frames", response_model=JobHandle)
+def index_frames_endpoint(req: IndexFramesRequest) -> JobHandle:
+    src = Path(req.source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+
+    job = _new_job("index_frames")
+
+    def run() -> None:
+        try:
+            job.status = "running"
+            cb = _progress_for(job)
+            from .vision import index_frames
+
+            out = frame_index_path(src)
+            n = index_frames(src, out, progress=cb)
+            job.finish(
+                "done",
+                result={"frame_index_path": str(out), "frame_count": n},
+            )
+        except Exception as e:
+            job.finish("error", error=str(e))
+
+    _executor.submit(run)
+    return JobHandle(job_id=job.id)
+
+
+class SearchContentRequest(BaseModel):
+    source_path: str
+    query: str
+    top_k: int = 5
+
+
+@app.post("/search-content")
+def search_content_endpoint(req: SearchContentRequest) -> dict[str, Any]:
+    """Search a previously-indexed source for visual matches to a text
+    query. Returns ranked timestamps with similarity scores. 404 if the
+    source isn't indexed yet — Cadence can use that signal to suggest
+    running the indexing pass."""
+    src = Path(req.source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+    idx = frame_index_path(src)
+    if not idx.exists():
+        raise HTTPException(404, f"no frame index for {src} — run /index-frames first")
+    from .vision import search
+
+    try:
+        results = search(idx, req.query, top_k=req.top_k)
+    except Exception as e:
+        raise HTTPException(500, f"search failed: {e}") from e
+    return {"query": req.query, "results": results}
+
+
 SpeechEnhanceLevel = Literal["off", "low", "medium", "high"]
+
+
+EnhanceEngine = Literal["classical", "neural"]
 
 
 class AudioSettings(BaseModel):
@@ -531,6 +741,11 @@ class AudioSettings(BaseModel):
     RenderRequest. All optional — defaults to no enhancement."""
 
     enhance_speech: SpeechEnhanceLevel = "off"
+    # "classical" = ffmpeg's afftdn (spectral subtraction). Fast, light,
+    # decent for low-noise sources but can sound thin.
+    # "neural" = DeepFilterNet (GRU model on ~100k hrs of speech-noise).
+    # Significantly better on real-world noise; ~real-time on CPU.
+    enhance_engine: EnhanceEngine = "classical"
     auto_duck: bool = False
     ducking_db: int = -8  # negative: lowers other tracks by this much
 
@@ -545,6 +760,10 @@ class RenderRequest(BaseModel):
     - **Audio-only mode**: caller passes ``source_path`` instead. We render
       the *whole* source — no cuts — with the audio enhancement chain
       applied. Doesn't require the AI pipeline to have run.
+
+    Pacing mode also accepts ``overrides`` and ``custom_cuts``. When either
+    is provided, the render re-runs the planner internally before encoding,
+    so the latest session state is always reflected — no stale-plan footgun.
     """
     analysis_path: str | None = None
     plan_path: str | None = None
@@ -553,6 +772,11 @@ class RenderRequest(BaseModel):
     encoder: Literal["auto", "h264_videotoolbox", "libx264"] = "auto"
     audio_bitrate: str = "192k"
     audio: AudioSettings | None = None
+    # Pacing-mode re-plan inputs. When set, /render re-runs the planner
+    # with these on top of the stored classification before encoding,
+    # so the user's latest overrides + custom cuts always make it in.
+    overrides: dict[str, str] | None = None
+    custom_cuts: list[CustomCutInput] | None = None
     # If set, the rendered MP4 is placed under the project's renders/ dir
     # with an `rNNN` ID prefix, and a render_history entry is appended.
     project_slug: str | None = None
@@ -606,14 +830,48 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
             raise HTTPException(404, f"analysis not found: {ap}")
         bundle = AnalysisBundle.model_validate_json(ap.read_text())
 
-        pp = (
-            Path(req.plan_path).expanduser()
-            if req.plan_path
-            else plan_path(bundle.ingest.source.path)
-        )
-        if not pp.exists():
-            raise HTTPException(404, f"plan not found: {pp}")
-        plan = CutPlan.model_validate_json(pp.read_text())
+        # If the caller passed overrides or custom_cuts, re-run the planner
+        # in-process so the render reflects current session state. Plan is
+        # interval algebra — basically free, no separate disk round-trip.
+        if req.overrides is not None or req.custom_cuts is not None:
+            cp = classified_path(bundle.ingest.source.path)
+            if not cp.exists():
+                raise HTTPException(404, f"classification not found: {cp}")
+            cls_bundle = ClassificationBundle.model_validate_json(
+                cp.read_text()
+            )
+            if req.overrides:
+                from .reviewer import apply_overrides
+
+                parsed_ovr = {
+                    _parse_override_key(k): v
+                    for k, v in req.overrides.items()
+                }
+                modified = apply_overrides(
+                    cls_bundle.classification, parsed_ovr  # type: ignore[arg-type]
+                )
+                cls_bundle = cls_bundle.model_copy(
+                    update={"classification": modified}
+                )
+            custom_cut_tuples = (
+                [(c.start, c.end, c.reason) for c in req.custom_cuts]
+                if req.custom_cuts
+                else None
+            )
+            plan = plan_cuts(
+                speech=bundle.speech,
+                classification_bundle=cls_bundle,
+                custom_cuts=custom_cut_tuples,
+            )
+        else:
+            pp = (
+                Path(req.plan_path).expanduser()
+                if req.plan_path
+                else plan_path(bundle.ingest.source.path)
+            )
+            if not pp.exists():
+                raise HTTPException(404, f"plan not found: {pp}")
+            plan = CutPlan.model_validate_json(pp.read_text())
 
         src = bundle.ingest.source.path
         if not src.exists():
@@ -631,7 +889,10 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
     render_id: str | None = None
     audio_suffix_parts: list[str] = []
     if req.audio and req.audio.enhance_speech != "off":
-        audio_suffix_parts.append(f"enhance-{req.audio.enhance_speech}")
+        tag = f"enhance-{req.audio.enhance_speech}"
+        if req.audio.enhance_engine == "neural":
+            tag += "-neural"
+        audio_suffix_parts.append(tag)
     if (
         req.audio
         and req.audio.auto_duck
@@ -660,6 +921,7 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
             auto_duck=(req.audio.auto_duck if req.audio else False),
             ducking_db=(req.audio.ducking_db if req.audio else -8),
             source_audio_track_count=audio_track_count,
+            enhance_engine=(req.audio.enhance_engine if req.audio else "classical"),
         )
 
     job = _new_job("render")
@@ -668,6 +930,48 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
         try:
             job.status = "running"
             cb = _progress_for(job)
+
+            # Neural pre-denoise. When engine == "neural" and enhancement is
+            # active, run DeepFilterNet on the source mic audio first and feed
+            # the cleaned WAV to ffmpeg as a second input. The renderer's
+            # external_audio_path branch swaps the mic stream for it and
+            # skips the in-graph afftdn chain so we don't double-process.
+            external_audio: Path | None = None
+            if (
+                req.audio
+                and req.audio.enhance_engine == "neural"
+                and req.audio.enhance_speech != "off"
+            ):
+                from .denoise import denoise_file, strength_to_atten_db
+
+                strength = req.audio.enhance_speech
+                cached = denoised_wav_path(src, strength)
+                if not cached.exists():
+                    cb(0.0, f"Extracting mic audio for neural denoise ({strength})…")
+                    mic_in = _ensure_decodable_audio(src)
+
+                    # DFN is the slow part; scale its internal progress into
+                    # the 0–0.3 band so the encode pass owns the rest.
+                    def dfn_progress(frac: float, msg: str) -> None:
+                        cb(min(0.3, max(0.0, frac) * 0.3), f"Denoising: {msg}")
+
+                    denoise_file(
+                        mic_in,
+                        cached,
+                        attenuation_lim_db=strength_to_atten_db(strength),
+                        progress=dfn_progress,
+                    )
+                external_audio = cached
+
+            # When external audio is in play, the renderer skips its own
+            # enhancement chain (the WAV is already cleaned), so pass "off"
+            # in that branch to avoid the filter graph re-running afftdn.
+            effective_enhance = (
+                "off"
+                if external_audio is not None
+                else (req.audio.enhance_speech if req.audio else "off")
+            )
+
             run_render(
                 source=src,
                 plan=plan,
@@ -675,10 +979,11 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 audio_track_index=track,
                 encoder=req.encoder,
                 audio_bitrate=req.audio_bitrate,
-                enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
+                enhance_speech=effective_enhance,
                 auto_duck=(req.audio.auto_duck if req.audio else False),
                 ducking_db=(req.audio.ducking_db if req.audio else -8),
                 source_audio_track_count=audio_track_count,
+                external_audio_path=external_audio,
                 progress=cb,
             )
             size = out.stat().st_size
@@ -886,6 +1191,78 @@ def splice_render_endpoint(req: SpliceRequest) -> JobHandle:
 
     _executor.submit(run)
     return JobHandle(job_id=job.id)
+
+
+# ─── Ask Cadence (natural-language editing) ─────────────────────────────────
+
+
+from . import cadence as _cadence_mod  # noqa: E402
+
+
+class CadenceTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str
+
+
+class CadenceQueryRequest(BaseModel):
+    message: str
+    history: list[CadenceTurn] = []
+    project_slug: str
+    active_source_rel: str | None = None
+    digest_text: str  # frontend builds the digest (it has session state)
+
+
+class ProposedActionResponse(BaseModel):
+    type: str
+    summary: str
+    params: dict[str, Any]
+
+
+class CadenceQueryResponse(BaseModel):
+    text: str
+    actions: list[ProposedActionResponse]
+    input_tokens: int
+    output_tokens: int
+
+
+@app.post("/cadence/query", response_model=CadenceQueryResponse)
+def cadence_query(req: CadenceQueryRequest) -> CadenceQueryResponse:
+    """Single turn of the Ask Cadence conversation.
+
+    Loads the project, hands off to ``cadence.query`` which runs Claude
+    with the tool-use loop, and returns the assistant's text plus any
+    proposed actions the user can apply via the frontend dispatcher.
+    """
+    try:
+        project = _projects_mod.load_project(req.project_slug)
+    except _projects_mod.ProjectNotFound as e:
+        raise HTTPException(404, str(e))
+
+    history = [
+        _cadence_mod.CadenceMessage(role=t.role, text=t.text)
+        for t in req.history
+    ]
+    try:
+        resp = _cadence_mod.query(
+            message=req.message,
+            history=history,
+            project=project,
+            active_source_rel=req.active_source_rel,
+            digest_text=req.digest_text,
+        )
+    except RuntimeError as e:
+        # Missing API key, etc — surface as 503.
+        raise HTTPException(503, str(e))
+
+    return CadenceQueryResponse(
+        text=resp.text,
+        actions=[
+            ProposedActionResponse(type=a.type, summary=a.summary, params=a.params)
+            for a in resp.actions
+        ],
+        input_tokens=resp.input_tokens,
+        output_tokens=resp.output_tokens,
+    )
 
 
 # ─── Job introspection ───────────────────────────────────────────────────────

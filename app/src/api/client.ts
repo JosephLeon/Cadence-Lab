@@ -3,6 +3,8 @@
 
 import type {
   AudioPeaks,
+  CadenceQueryResponse,
+  CadenceTurn,
   JobEvent,
   JobHandle,
   JobStatusResponse,
@@ -75,12 +77,43 @@ export const api = {
       },
     ),
 
+  /** Remove a source from the project's manifest. Returns the updated
+   *  manifest. ``path`` is the manifest's ``sources[i].path`` value, not
+   *  the absolute filesystem path. */
+  removeSource: (
+    slug: string,
+    path: string,
+    opts: { deleteFile?: boolean } = {},
+  ) => {
+    const params = new URLSearchParams({ path });
+    if (opts.deleteFile) params.set("delete_file", "true");
+    return jsonFetch<Project>(
+      `/projects/${encodeURIComponent(slug)}/sources?${params.toString()}`,
+      { method: "DELETE" },
+    );
+  },
+
   /** Irreversibly delete a project (directory + manifest + all artifacts/renders). */
   deleteProject: (slug: string) =>
     jsonFetch<{ status: string; slug: string }>(
       `/projects/${encodeURIComponent(slug)}`,
       { method: "DELETE" },
     ),
+
+  /** Single turn of the Ask Cadence conversation. The frontend builds the
+   *  digest (it has live session state); the backend feeds it into Claude's
+   *  system prompt along with the user message + history. */
+  cadenceQuery: (req: {
+    message: string;
+    history: CadenceTurn[];
+    project_slug: string;
+    active_source_rel: string | null;
+    digest_text: string;
+  }) =>
+    jsonFetch<CadenceQueryResponse>("/cadence/query", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
 
   probe: (source_path: string) =>
     jsonFetch<ProbeResponse>("/probe", {
@@ -102,6 +135,31 @@ export const api = {
 
   classify: (req: { analysis_path: string; min_pause_ms?: number }) =>
     jsonFetch<JobHandle>("/classify", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  detectEvents: (req: { source_path: string; mic_track?: number }) =>
+    jsonFetch<JobHandle>("/detect-events", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  indexFrames: (req: { source_path: string }) =>
+    jsonFetch<JobHandle>("/index-frames", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  searchContent: (req: {
+    source_path: string;
+    query: string;
+    top_k?: number;
+  }) =>
+    jsonFetch<{
+      query: string;
+      results: { time: number; score: number }[];
+    }>("/search-content", {
       method: "POST",
       body: JSON.stringify(req),
     }),
@@ -156,9 +214,15 @@ export const api = {
     audio_bitrate?: string;
     audio?: {
       enhance_speech: "off" | "low" | "medium" | "high";
+      enhance_engine: "classical" | "neural";
       auto_duck: boolean;
       ducking_db: number;
     };
+    /** Pacing-mode re-plan inputs. When present, /render re-runs the
+     *  planner with these on top of the classification before encoding,
+     *  so the user's latest in-session edits always make it in. */
+    overrides?: Record<string, string>;
+    custom_cuts?: Array<{ start: number; end: number; reason: string }>;
     /** When set, output is written to the project's renders/ dir as
      *  `rNNN.<stem>[.paced][.<audio-suffix>].mp4` and an entry is
      *  appended to the project's render_history. */

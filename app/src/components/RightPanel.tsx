@@ -1,12 +1,14 @@
 import { useState } from "react";
 import type {
   AudioSettings,
+  EnhanceEngine,
   JobState,
   MediaItem,
-  PipelineState,
   SpeechEnhanceLevel,
 } from "../stores/project";
 import { useProject } from "../stores/project";
+import { useCanvasView } from "../stores/canvasView";
+import { videoRef } from "../stores/videoRef";
 import { usePipeline } from "../hooks/usePipeline";
 import { ProjectFilesPanel } from "./ProjectFilesPanel";
 
@@ -40,13 +42,6 @@ export function RightPanel({ onOpenReview }: Props) {
     <aside className="w-80 shrink-0 border-l border-border bg-bg-panel flex flex-col min-h-0">
       <PanelHeader />
 
-      {/* Inspector — context that applies regardless of tab. Collapsible
-          and starts closed to save vertical space; the data here is rarely
-          needed once the user knows what clip they loaded. */}
-      <div className="shrink-0 border-b border-border">
-        <Inspector item={item} />
-      </div>
-
       {/* Pipeline — feeds both Pacing and Audio. Lives above the tabs so
           it's clear these stages are prerequisites for either flow. */}
       <div className="shrink-0 border-b border-border">
@@ -55,6 +50,19 @@ export function RightPanel({ onOpenReview }: Props) {
           onRun={runStage}
           onRunAll={runAllStages}
         />
+      </div>
+
+      {/* Audio events — optional non-speech sound detection. Lives
+          outside Pipeline because it's slow + opt-in; most users will
+          never need it. */}
+      <div className="shrink-0 border-b border-border">
+        <AudioEventsSection item={item} onRun={runStage} />
+      </div>
+
+      {/* Visual search — optional CLIP frame-embedding index. Powers
+          "find clips where X is shown" via the Ask Cadence chat. */}
+      <div className="shrink-0 border-b border-border">
+        <VisualSearchSection item={item} onRun={runStage} />
       </div>
 
       {/* Project Files — browse sources and accumulated renders for the
@@ -209,6 +217,191 @@ function PipelineSection({
   );
 }
 
+function AudioEventsSection({
+  item,
+  onRun,
+}: {
+  item: MediaItem;
+  onRun: (stage: "detect_events") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const done = !!item.pipeline.eventsPath;
+  const isRunning =
+    item.job?.stage === "detect_events" && !item.job.error;
+  const error =
+    item.job?.stage === "detect_events" && item.job.error
+      ? item.job.error
+      : null;
+
+  const statusText = isRunning
+    ? "scanning…"
+    : done
+    ? "✓ scanned"
+    : "not scanned";
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-text-muted text-xs w-3 shrink-0">
+            {open ? "▾" : "▸"}
+          </span>
+          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
+            Audio events
+          </h3>
+          {!open && (
+            <span
+              className={
+                "text-xs truncate " +
+                (done
+                  ? "text-emerald-400"
+                  : isRunning
+                  ? "text-accent"
+                  : "text-text-secondary")
+              }
+            >
+              {statusText}
+            </span>
+          )}
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          <p className="text-[10px] text-text-secondary px-1 mb-2 leading-snug">
+            Detect non-speech sounds (sniffles, throat clears, coughs)
+            so Cadence can offer one-shot removal. Optional and slow
+            (~real-time on CPU) — only run when you want it. First run
+            downloads a ~320MB detection model.
+          </p>
+          {isRunning ? (
+            <div className="space-y-1.5 px-1">
+              <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-accent transition-all duration-200"
+                  style={{
+                    width: `${Math.max(2, (item.job?.progress ?? 0) * 100)}%`,
+                  }}
+                />
+              </div>
+              <div className="text-[10px] text-text-secondary truncate">
+                {item.job?.message || "Detecting…"}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => onRun("detect_events")}
+              className="w-full h-8 rounded-md bg-bg-elevated hover:bg-border text-text-primary text-xs font-medium transition-colors"
+            >
+              {done ? "Re-scan" : "▶ Scan for audio events"}
+            </button>
+          )}
+          {error && (
+            <div className="text-[10px] text-rose-400 mt-2" title={error}>
+              ✗ {error}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function VisualSearchSection({
+  item,
+  onRun,
+}: {
+  item: MediaItem;
+  onRun: (stage: "index_frames") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const done = !!item.pipeline.frameIndexPath;
+  const isRunning =
+    item.job?.stage === "index_frames" && !item.job.error;
+  const error =
+    item.job?.stage === "index_frames" && item.job.error
+      ? item.job.error
+      : null;
+
+  const statusText = isRunning
+    ? "indexing…"
+    : done
+    ? "✓ indexed"
+    : "not indexed";
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-text-muted text-xs w-3 shrink-0">
+            {open ? "▾" : "▸"}
+          </span>
+          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
+            Visual search
+          </h3>
+          {!open && (
+            <span
+              className={
+                "text-xs truncate " +
+                (done
+                  ? "text-emerald-400"
+                  : isRunning
+                  ? "text-accent"
+                  : "text-text-secondary")
+              }
+            >
+              {statusText}
+            </span>
+          )}
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          <p className="text-[10px] text-text-secondary px-1 mb-2 leading-snug">
+            Build a CLIP frame-embedding index so Cadence can answer
+            "find the part where the walnut table is shown" or "where
+            the dog appears." Optional; only run when you want visual
+            search on this source. First run downloads a ~150MB CLIP
+            model.
+          </p>
+          {isRunning ? (
+            <div className="space-y-1.5 px-1">
+              <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-accent transition-all duration-200"
+                  style={{
+                    width: `${Math.max(2, (item.job?.progress ?? 0) * 100)}%`,
+                  }}
+                />
+              </div>
+              <div className="text-[10px] text-text-secondary truncate">
+                {item.job?.message || "Indexing…"}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => onRun("index_frames")}
+              className="w-full h-8 rounded-md bg-bg-elevated hover:bg-border text-text-primary text-xs font-medium transition-colors"
+            >
+              {done ? "Re-index" : "▶ Build visual search index"}
+            </button>
+          )}
+          {error && (
+            <div className="text-[10px] text-rose-400 mt-2" title={error}>
+              ✗ {error}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PanelHeader() {
   return (
     <div className="h-10 shrink-0 border-b border-border flex items-center px-3">
@@ -258,79 +451,11 @@ function TabButton({
   );
 }
 
-// ─── Inspector (always visible) ──────────────────────────────────────────────
-
-function Inspector({ item }: { item: MediaItem }) {
-  const [open, setOpen] = useState(false);
-  const fileName = item.path.split("/").pop() ?? "—";
-
-  return (
-    <div>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-text-muted text-xs w-3 shrink-0">
-            {open ? "▾" : "▸"}
-          </span>
-          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
-            Inspector
-          </h3>
-          {!open && (
-            <span
-              className="text-xs text-text-secondary truncate"
-              title={fileName}
-            >
-              {fileName}
-            </span>
-          )}
-        </div>
-      </button>
-      {open && (
-        <div className="px-3 pb-3 space-y-1">
-          <KV label="File" value={fileName} />
-          {item.probe && (
-            <>
-              <KV
-                label="Duration"
-                value={`${item.probe.duration_seconds.toFixed(1)} s`}
-              />
-              <KV
-                label="Resolution"
-                value={
-                  item.probe.width
-                    ? `${item.probe.width}×${item.probe.height}`
-                    : "—"
-                }
-              />
-              <KV
-                label="Frame rate"
-                value={
-                  item.probe.frame_rate
-                    ? `${item.probe.frame_rate.toFixed(2)} fps`
-                    : "—"
-                }
-              />
-              <KV
-                label="Audio tracks"
-                value={item.probe.audio_tracks.length}
-              />
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function KV({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex items-center justify-between px-1 py-0.5 text-xs">
-      <span className="text-text-secondary">{label}</span>
-      <span className="text-text-primary font-medium">{value}</span>
-    </div>
-  );
+function fmtClipTime(s: number): string {
+  if (!Number.isFinite(s) || s < 0) return "0:00.0";
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
 }
 
 // ─── Pacing tab ──────────────────────────────────────────────────────────────
@@ -342,6 +467,19 @@ interface PacingTabProps {
 }
 
 function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
+  const removeCustomCut = useProject((s) => s.removeCustomCut);
+  const setCanvasView = useCanvasView((s) => s.setView);
+
+  /**
+   * Audition a custom cut: jump the Canvas to the source video (custom
+   * cuts only exist on the source — the rendered file would already have
+   * them removed) and play from ~1s before to ~1s after the cut range so
+   * the user can hear/see what would be removed.
+   */
+  const previewCut = (start: number, end: number) => {
+    setCanvasView("source");
+    videoRef.previewRange(start, end, { padBefore: 1.0, padAfter: 1.0 });
+  };
   const isRendering =
     item.job?.stage === "render" && !item.job.error;
   const renderError =
@@ -351,6 +489,42 @@ function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
 
   return (
     <>
+      {item.customCuts.length > 0 && (
+        <Section title={`Custom cuts (${item.customCuts.length})`}>
+          <ul className="space-y-1">
+            {item.customCuts.map((c, i) => (
+              <li
+                key={`${c.start}-${c.end}-${i}`}
+                className="group flex items-start gap-2 px-2 py-1.5 rounded hover:bg-bg-elevated text-xs cursor-pointer"
+                onClick={() => previewCut(c.start, c.end)}
+                title="Click to preview — plays the source from 1s before to 1s after the cut"
+              >
+                <span className="text-text-muted shrink-0 mt-0.5">▶</span>
+                <span className="font-mono text-text-secondary shrink-0">
+                  {fmtClipTime(c.start)}–{fmtClipTime(c.end)}
+                </span>
+                <span className="flex-1 text-text-muted truncate" title={c.reason}>
+                  {c.reason || "(no reason given)"}
+                </span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeCustomCut(item.path, i);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-rose-400 shrink-0"
+                  title="Remove custom cut"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[10px] text-text-muted mt-2 px-1 leading-snug">
+            Click a row to preview · Applied on top of the AI cut plan at render time.
+          </p>
+        </Section>
+      )}
+
       <Section title="Review">
         <button
           onClick={onOpenReview}
@@ -416,9 +590,6 @@ function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
         )}
       </Section>
 
-      <Section title="Output paths">
-        <PipelinePaths pipeline={item.pipeline} />
-      </Section>
     </>
   );
 }
@@ -456,13 +627,28 @@ function AudioTab({ item, onChange, onRender }: AudioTabProps) {
           sub="Denoise, dereverb, voice clarity boost. Adds time at render."
         />
         {audio.enhance_speech !== "off" && (
-          <div className="pt-2 pl-7 space-y-1">
-            <div className="text-[10px] text-text-secondary">Strength</div>
-            <SegmentedControl
-              options={["low", "medium", "high"] as const}
-              value={audio.enhance_speech as SpeechEnhanceLevel}
-              onChange={(v) => onChange({ enhance_speech: v })}
-            />
+          <div className="pt-2 pl-7 space-y-3">
+            <div className="space-y-1">
+              <div className="text-[10px] text-text-secondary">Strength</div>
+              <SegmentedControl
+                options={["low", "medium", "high"] as const}
+                value={audio.enhance_speech as SpeechEnhanceLevel}
+                onChange={(v) => onChange({ enhance_speech: v })}
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] text-text-secondary">Engine</div>
+              <SegmentedControl
+                options={["classical", "neural"] as const}
+                value={audio.enhance_engine as EnhanceEngine}
+                onChange={(v) => onChange({ enhance_engine: v })}
+              />
+              <p className="text-[10px] text-text-muted leading-snug pt-1">
+                {audio.enhance_engine === "neural"
+                  ? "DeepFilterNet — better on real-world noise (HVAC, keyboard, room). First run downloads ~6MB model. Slower."
+                  : "ffmpeg afftdn — fast spectral denoise. Good for low hum / static. Can sound thin on louder noise."}
+              </p>
+            </div>
           </div>
         )}
       </Section>
@@ -707,39 +893,6 @@ function StageRow({
           ✗ {job?.error}
         </div>
       )}
-    </div>
-  );
-}
-
-function PipelinePaths({ pipeline }: { pipeline: PipelineState }) {
-  const rows = [
-    ["Analysis", pipeline.analysisPath],
-    ["Classification", pipeline.classifiedPath],
-    ["Plan", pipeline.planPath],
-    ["Rendered", pipeline.renderedPath],
-  ] as const;
-
-  if (rows.every(([, p]) => !p)) {
-    return (
-      <div className="text-[10px] text-text-muted px-1">
-        Run the pipeline to populate output paths.
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      {rows.map(([label, path]) => (
-        <div key={label} className="px-1 py-0.5">
-          <div className="text-[10px] text-text-muted">{label}</div>
-          <div
-            className="text-xs font-mono truncate"
-            title={path ?? "(not produced yet)"}
-          >
-            {path ?? <span className="text-text-muted">—</span>}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }

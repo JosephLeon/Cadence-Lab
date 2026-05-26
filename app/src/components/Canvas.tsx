@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useProject } from "../stores/project";
 import { videoRef } from "../stores/videoRef";
+import { useCanvasView } from "../stores/canvasView";
 import { api } from "../api/client";
 
 function fmtTime(s: number): string {
@@ -10,17 +11,16 @@ function fmtTime(s: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-type View = "source" | "edited";
-
 export function Canvas() {
   const media = useProject((s) => s.media);
   const active = useProject((s) => s.activeMediaPath);
   const playback = useProject((s) => s.playback);
   const setPlayback = useProject((s) => s.setPlayback);
+  const view = useCanvasView((s) => s.view);
+  const setView = useCanvasView((s) => s.setView);
   const item = media.find((m) => m.path === active);
 
   const elRef = useRef<HTMLVideoElement | null>(null);
-  const [view, setView] = useState<View>("source");
 
   // If the user switched clips or the rendered file disappeared, snap back
   // to source so we don't try to load a stale URL.
@@ -28,7 +28,7 @@ export function Canvas() {
     if (view === "edited" && !item?.pipeline.renderedPath) {
       setView("source");
     }
-  }, [view, item?.pipeline.renderedPath]);
+  }, [view, item?.pipeline.renderedPath, setView]);
 
   // Pick the correct URL based on view mode. The rendered MP4 lives under
   // the output dir, so we serve it via /files/<relative>; source uses the

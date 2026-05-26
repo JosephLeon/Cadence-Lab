@@ -97,6 +97,11 @@ function syncStoresWithProject(project: Project) {
         addMedia(p, {
           audio: aiState?.audio,
           overrides: aiState?.overrides,
+          customCuts: aiState?.custom_cuts?.map((c) => ({
+            start: c.start,
+            end: c.end,
+            reason: c.reason,
+          })),
         });
         void probeIntoAITab(p, updateMedia);
       }
@@ -146,6 +151,8 @@ async function probeIntoAITab(
         planPath: p.plan_exists ? p.plan : undefined,
         renderedPath: p.rendered_exists ? p.rendered : undefined,
         micWavPath: p.analysis_exists ? micWavPath : undefined,
+        eventsPath: p.events_exists ? p.events : undefined,
+        frameIndexPath: p.frame_index_exists ? p.frame_index : undefined,
       },
     });
   } catch (e) {

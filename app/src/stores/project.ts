@@ -17,6 +17,10 @@ export interface PipelineState {
   renderedPath?: string;
   /** Mic-only 16k WAV produced during ingest; used for per-cut audio clips. */
   micWavPath?: string;
+  /** Opt-in audio-event detection output (sniffles/throat clears/etc). */
+  eventsPath?: string;
+  /** Opt-in CLIP frame-embedding index for visual semantic search. */
+  frameIndexPath?: string;
 }
 
 /**
@@ -30,7 +34,14 @@ export type OverrideMap = Record<string, string>;
 
 /** Per-media job state. Only one stage at a time runs against a single clip. */
 export interface JobState {
-  stage: "analyze" | "classify" | "plan" | "render" | "render_audio";
+  stage:
+    | "analyze"
+    | "classify"
+    | "plan"
+    | "render"
+    | "render_audio"
+    | "detect_events"
+    | "index_frames";
   jobId?: string;       // undefined for sync stages (plan)
   progress: number;
   message: string;
@@ -45,17 +56,34 @@ export interface JobState {
  */
 export type SpeechEnhanceLevel = "off" | "low" | "medium" | "high";
 
+/** "classical" = ffmpeg afftdn (spectral subtraction). Fast, no model.
+ *  "neural"   = DeepFilterNet (GRU model). Slower (~real-time on CPU,
+ *  first run downloads a ~6MB model) but significantly better on real-
+ *  world noise. */
+export type EnhanceEngine = "classical" | "neural";
+
 export interface AudioSettings {
   enhance_speech: SpeechEnhanceLevel;
+  enhance_engine: EnhanceEngine;
   auto_duck: boolean;
   ducking_db: number;  // negative; e.g. -8 lowers other tracks by 8 dB
 }
 
 export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
   enhance_speech: "off",
+  enhance_engine: "classical",
   auto_duck: false,
   ducking_db: -8,
 };
+
+export interface CustomCut {
+  /** Source-time seconds. */
+  start: number;
+  end: number;
+  /** Why the cut exists — shown in the right-panel list. Cadence
+   *  populates this; user-added cuts may have an empty reason. */
+  reason: string;
+}
 
 export interface MediaItem {
   /** Absolute path on the user's filesystem */
@@ -75,6 +103,9 @@ export interface MediaItem {
   overrides: OverrideMap;
   /** AI audio enhancement settings applied at render time */
   audio: AudioSettings;
+  /** User/Cadence-added arbitrary cuts. Merged with the classifier-derived
+   *  cuts at plan time. */
+  customCuts: CustomCut[];
 }
 
 /** Playback state for the active video. */
@@ -91,7 +122,11 @@ interface ProjectState {
 
   addMedia: (
     path: string,
-    initial?: { audio?: AudioSettings; overrides?: OverrideMap },
+    initial?: {
+      audio?: AudioSettings;
+      overrides?: OverrideMap;
+      customCuts?: CustomCut[];
+    },
   ) => void;
   updateMedia: (path: string, patch: Partial<MediaItem>) => void;
   removeMedia: (path: string) => void;
@@ -100,6 +135,8 @@ interface ProjectState {
   setOverride: (mediaPath: string, key: string, value: string | null) => void;
   clearOverrides: (mediaPath: string) => void;
   setAudio: (mediaPath: string, patch: Partial<AudioSettings>) => void;
+  addCustomCut: (mediaPath: string, cut: CustomCut) => void;
+  removeCustomCut: (mediaPath: string, index: number) => void;
   /** Wipe all media + playback. Called when the active project changes so
    *  the AI tab doesn't show stale items from a different workspace.
    *  Step 3 will make this redundant by sourcing media from the project
@@ -119,12 +156,17 @@ function persistSourceAIState(
   mediaPath: string,
   audio: AudioSettings,
   overrides: OverrideMap,
+  customCuts: CustomCut[],
 ): void {
   const project = useActiveProject.getState().project;
   if (!project) return;
   const key = projectRelativePath(project, mediaPath);
   useActiveProject.getState().mutate((p) => {
-    p.ai_state[key] = { audio: { ...audio }, overrides: { ...overrides } };
+    p.ai_state[key] = {
+      audio: { ...audio },
+      overrides: { ...overrides },
+      custom_cuts: customCuts.map((c) => ({ ...c })),
+    };
   });
 }
 
@@ -152,6 +194,9 @@ export const useProject = create<ProjectState>((set, get) => ({
             audio: initial?.audio
               ? { ...DEFAULT_AUDIO_SETTINGS, ...initial.audio }
               : { ...DEFAULT_AUDIO_SETTINGS },
+            customCuts: initial?.customCuts
+              ? initial.customCuts.map((c) => ({ ...c }))
+              : [],
           },
         ],
         activeMediaPath: s.activeMediaPath ?? path,
@@ -193,7 +238,7 @@ export const useProject = create<ProjectState>((set, get) => ({
       }),
     }));
     const m = get().media.find((x) => x.path === mediaPath);
-    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides, m.customCuts);
   },
 
   clearOverrides: (mediaPath) => {
@@ -203,7 +248,7 @@ export const useProject = create<ProjectState>((set, get) => ({
       ),
     }));
     const m = get().media.find((x) => x.path === mediaPath);
-    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides, m.customCuts);
   },
 
   setAudio: (mediaPath, patch) => {
@@ -213,7 +258,34 @@ export const useProject = create<ProjectState>((set, get) => ({
       ),
     }));
     const m = get().media.find((x) => x.path === mediaPath);
-    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides, m.customCuts);
+  },
+
+  addCustomCut: (mediaPath, cut) => {
+    set((s) => ({
+      media: s.media.map((m) =>
+        m.path === mediaPath
+          ? { ...m, customCuts: [...m.customCuts, { ...cut }] }
+          : m,
+      ),
+    }));
+    const m = get().media.find((x) => x.path === mediaPath);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides, m.customCuts);
+  },
+
+  removeCustomCut: (mediaPath, index) => {
+    set((s) => ({
+      media: s.media.map((m) =>
+        m.path === mediaPath
+          ? {
+              ...m,
+              customCuts: m.customCuts.filter((_, i) => i !== index),
+            }
+          : m,
+      ),
+    }));
+    const m = get().media.find((x) => x.path === mediaPath);
+    if (m) persistSourceAIState(mediaPath, m.audio, m.overrides, m.customCuts);
   },
 
   clearAll: () =>
