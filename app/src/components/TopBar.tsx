@@ -19,7 +19,7 @@ export function TopBar({ serverOk, view, onViewChange }: Props) {
   const showServerStatus = serverOk !== true;
 
   return (
-    <header className="h-12 shrink-0 border-b border-border flex items-center px-4 gap-3 bg-bg-panel">
+    <header className="h-12 shrink-0 border-t border-b border-border flex items-center px-4 gap-3 bg-bg-panel">
       <h1 className="font-semibold tracking-tight">Cadence Lab</h1>
 
       <ProjectSwitcher />

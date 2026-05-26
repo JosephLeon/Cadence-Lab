@@ -71,7 +71,7 @@ export function CadencePanel() {
     >
       <div className="absolute inset-0 bg-black/30" />
       <aside
-        className="relative w-[440px] max-w-[90vw] h-full bg-bg-panel border-l border-border shadow-2xl flex flex-col"
+        className="relative w-[440px] max-w-[90vw] h-full bg-bg-panel border-t border-l border-border shadow-2xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="h-12 shrink-0 border-b border-border flex items-center justify-between px-4">

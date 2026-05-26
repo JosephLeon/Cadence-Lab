@@ -4,7 +4,6 @@ import type {
   EnhanceEngine,
   JobState,
   MediaItem,
-  PipelineState,
   SpeechEnhanceLevel,
 } from "../stores/project";
 import { useProject } from "../stores/project";
@@ -42,13 +41,6 @@ export function RightPanel({ onOpenReview }: Props) {
   return (
     <aside className="w-80 shrink-0 border-l border-border bg-bg-panel flex flex-col min-h-0">
       <PanelHeader />
-
-      {/* Inspector — context that applies regardless of tab. Collapsible
-          and starts closed to save vertical space; the data here is rarely
-          needed once the user knows what clip they loaded. */}
-      <div className="shrink-0 border-b border-border">
-        <Inspector item={item} />
-      </div>
 
       {/* Pipeline — feeds both Pacing and Audio. Lives above the tabs so
           it's clear these stages are prerequisites for either flow. */}
@@ -459,86 +451,11 @@ function TabButton({
   );
 }
 
-// ─── Inspector (always visible) ──────────────────────────────────────────────
-
-function Inspector({ item }: { item: MediaItem }) {
-  const [open, setOpen] = useState(false);
-  const fileName = item.path.split("/").pop() ?? "—";
-
-  return (
-    <div>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-text-muted text-xs w-3 shrink-0">
-            {open ? "▾" : "▸"}
-          </span>
-          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
-            Inspector
-          </h3>
-          {!open && (
-            <span
-              className="text-xs text-text-secondary truncate"
-              title={fileName}
-            >
-              {fileName}
-            </span>
-          )}
-        </div>
-      </button>
-      {open && (
-        <div className="px-3 pb-3 space-y-1">
-          <KV label="File" value={fileName} />
-          {item.probe && (
-            <>
-              <KV
-                label="Duration"
-                value={`${item.probe.duration_seconds.toFixed(1)} s`}
-              />
-              <KV
-                label="Resolution"
-                value={
-                  item.probe.width
-                    ? `${item.probe.width}×${item.probe.height}`
-                    : "—"
-                }
-              />
-              <KV
-                label="Frame rate"
-                value={
-                  item.probe.frame_rate
-                    ? `${item.probe.frame_rate.toFixed(2)} fps`
-                    : "—"
-                }
-              />
-              <KV
-                label="Audio tracks"
-                value={item.probe.audio_tracks.length}
-              />
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function fmtClipTime(s: number): string {
   if (!Number.isFinite(s) || s < 0) return "0:00.0";
   const m = Math.floor(s / 60);
   const sec = s % 60;
   return `${m}:${sec.toFixed(1).padStart(4, "0")}`;
-}
-
-function KV({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="flex items-center justify-between px-1 py-0.5 text-xs">
-      <span className="text-text-secondary">{label}</span>
-      <span className="text-text-primary font-medium">{value}</span>
-    </div>
-  );
 }
 
 // ─── Pacing tab ──────────────────────────────────────────────────────────────
@@ -673,9 +590,6 @@ function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
         )}
       </Section>
 
-      <Section title="Output paths">
-        <PipelinePaths pipeline={item.pipeline} />
-      </Section>
     </>
   );
 }
@@ -979,39 +893,6 @@ function StageRow({
           ✗ {job?.error}
         </div>
       )}
-    </div>
-  );
-}
-
-function PipelinePaths({ pipeline }: { pipeline: PipelineState }) {
-  const rows = [
-    ["Analysis", pipeline.analysisPath],
-    ["Classification", pipeline.classifiedPath],
-    ["Plan", pipeline.planPath],
-    ["Rendered", pipeline.renderedPath],
-  ] as const;
-
-  if (rows.every(([, p]) => !p)) {
-    return (
-      <div className="text-[10px] text-text-muted px-1">
-        Run the pipeline to populate output paths.
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      {rows.map(([label, path]) => (
-        <div key={label} className="px-1 py-0.5">
-          <div className="text-[10px] text-text-muted">{label}</div>
-          <div
-            className="text-xs font-mono truncate"
-            title={path ?? "(not produced yet)"}
-          >
-            {path ?? <span className="text-text-muted">—</span>}
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
