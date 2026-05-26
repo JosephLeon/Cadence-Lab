@@ -198,6 +198,13 @@ def events_path(source: Path) -> Path:
     return artifacts_dir(source) / f"{source.stem}.events.json"
 
 
+def frame_index_path(source: Path) -> Path:
+    """Where the opt-in CLIP frame-embedding index for visual search is
+    cached for a given source. ``.npz`` containing timestamps + per-frame
+    embeddings; cheap to load, ~3-4 MB for a 30-min video at 1 fps."""
+    return artifacts_dir(source) / f"{source.stem}.frames.npz"
+
+
 # ─── Backward-compat: legacy flat-layout lookups ─────────────────────────────
 
 

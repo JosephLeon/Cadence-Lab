@@ -41,6 +41,76 @@ export function applyCadenceAction(action: ProposedAction): void {
       return;
     }
 
+    case "run_visual_index": {
+      // Kick off the (slow) frame-indexing background job. Same
+      // auto-resume pattern as the audio-event scan: capture the user's
+      // last message, fire a follow-up Cadence turn when the job
+      // completes so cuts/results land without the user re-asking.
+      const sourcePath = activeMediaPathOrThrow(
+        "run_visual_index needs an active source",
+      );
+      const turns = useCadence.getState().turns;
+      const lastUserMessage =
+        [...turns].reverse().find((t) => t.role === "user")?.text ?? null;
+      void api.indexFrames({ source_path: sourcePath }).then((handle) => {
+        const updateMedia = useProject.getState().updateMedia;
+        updateMedia(sourcePath, {
+          job: {
+            stage: "index_frames",
+            jobId: handle.job_id,
+            progress: 0,
+            message: "Starting…",
+          },
+        });
+        const unsub = api.subscribeJob(
+          handle.job_id,
+          (ev) => {
+            if (ev._terminal) {
+              unsub();
+              void api.getJob(handle.job_id).then((j) => {
+                const result = j.result as
+                  | { frame_index_path?: string; frame_count?: number }
+                  | null;
+                const frameIndexPath = result?.frame_index_path;
+                const cur = useProject
+                  .getState()
+                  .media.find((m) => m.path === sourcePath);
+                updateMedia(sourcePath, {
+                  pipeline: { ...cur?.pipeline, frameIndexPath },
+                  job: null,
+                });
+                if (
+                  j.status === "done" &&
+                  lastUserMessage &&
+                  useActiveProject.getState().project
+                ) {
+                  const followup =
+                    `(Visual search index ready — ${
+                      result?.frame_count ?? "?"
+                    } frames indexed.) ` +
+                    `Continue with the previous request: "${lastUserMessage}"`;
+                  void submitCadenceQuery(followup).catch(() => {});
+                }
+              });
+              return;
+            }
+            if (typeof ev.progress === "number") {
+              updateMedia(sourcePath, {
+                job: {
+                  stage: "index_frames",
+                  jobId: handle.job_id,
+                  progress: ev.progress,
+                  message: ev.message ?? "",
+                },
+              });
+            }
+          },
+          () => {},
+        );
+      });
+      return;
+    }
+
     case "run_audio_event_scan": {
       // Kick off the (slow) detect-events background job. Captures the
       // user's most-recent message *now* so that when the scan finishes

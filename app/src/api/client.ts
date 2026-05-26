@@ -145,6 +145,25 @@ export const api = {
       body: JSON.stringify(req),
     }),
 
+  indexFrames: (req: { source_path: string }) =>
+    jsonFetch<JobHandle>("/index-frames", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  searchContent: (req: {
+    source_path: string;
+    query: string;
+    top_k?: number;
+  }) =>
+    jsonFetch<{
+      query: string;
+      results: { time: number; score: number }[];
+    }>("/search-content", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
   plan: (req: {
     analysis_path: string;
     classified_path?: string;

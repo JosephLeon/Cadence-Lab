@@ -27,7 +27,8 @@ type Stage =
   | "plan"
   | "render"
   | "render_audio"
-  | "detect_events";
+  | "detect_events"
+  | "index_frames";
 
 /**
  * Block on an async job: subscribe to its SSE event stream, mirror progress
@@ -152,6 +153,24 @@ export function usePipeline(mediaPath: string | null) {
           const after = latest();
           updateMedia(mediaPath, {
             pipeline: { ...after?.pipeline, planPath: res.plan_path },
+            job: null,
+          });
+        } else if (stage === "index_frames") {
+          // Opt-in: builds a CLIP frame-embedding index for visual
+          // semantic search ("find the walnut table", "find when the
+          // dog is on screen"). Slow first run (downloads ~150MB CLIP
+          // model). Cached per-source in <project>/artifacts.
+          const handle = await api.indexFrames({ source_path: mediaPath });
+          updateMedia(mediaPath, {
+            job: { stage, jobId: handle.job_id, progress: 0, message: "Starting…" },
+          });
+          const job = await waitForJob(handle.job_id, setJobProgress);
+          const frameIndexPath = (
+            job.result as { frame_index_path?: string } | null
+          )?.frame_index_path;
+          const after = latest();
+          updateMedia(mediaPath, {
+            pipeline: { ...after?.pipeline, frameIndexPath },
             job: null,
           });
         } else if (stage === "detect_events") {

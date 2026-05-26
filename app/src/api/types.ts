@@ -38,6 +38,8 @@ export interface CanonicalPaths {
   mic_wav_exists: boolean;
   events: string;
   events_exists: boolean;
+  frame_index: string;
+  frame_index_exists: boolean;
 }
 
 // ─── Projects (workspace) ──────────────────────────────────────────────────

@@ -86,6 +86,7 @@ from .paths import (
     cache_dir,
     classified_path,
     events_path,
+    frame_index_path,
     mic_wav_path,
     output_dir,
     plan_path,
@@ -114,7 +115,9 @@ class Job:
     """One async pipeline run. Thread-safe via the GIL for our simple usage."""
 
     id: str
-    kind: Literal["analyze", "classify", "render", "splice", "detect_events"]
+    kind: Literal[
+    "analyze", "classify", "render", "splice", "detect_events", "index_frames"
+]
     status: JobStatus = "pending"
     progress: float = 0.0
     message: str = ""
@@ -151,7 +154,9 @@ _jobs: dict[str, Job] = {}
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="cadence-job")
 
 
-def _new_job(kind: Literal["analyze", "classify", "render", "splice", "detect_events"]) -> Job:
+def _new_job(kind: Literal[
+    "analyze", "classify", "render", "splice", "detect_events", "index_frames"
+]) -> Job:
     job = Job(id=str(uuid.uuid4()), kind=kind)
     _jobs[job.id] = job
     return job
@@ -329,12 +334,14 @@ class CanonicalPaths(BaseModel):
     rendered: str
     mic_wav: str
     events: str
+    frame_index: str
     analysis_exists: bool
     classified_exists: bool
     plan_exists: bool
     rendered_exists: bool
     mic_wav_exists: bool
     events_exists: bool
+    frame_index_exists: bool
 
 
 class ProbeResponse(BaseModel):
@@ -359,6 +366,7 @@ def _canonical_paths(source: Path) -> CanonicalPaths:
     rp = rendered_path(source)
     mp = mic_wav_path(source)
     ep = events_path(source)
+    fp = frame_index_path(source)
     return CanonicalPaths(
         analysis=str(ap),
         classified=str(cp),
@@ -366,12 +374,14 @@ def _canonical_paths(source: Path) -> CanonicalPaths:
         rendered=str(rp),
         mic_wav=str(mp),
         events=str(ep),
+        frame_index=str(fp),
         analysis_exists=ap.exists(),
         classified_exists=cp.exists(),
         plan_exists=pp.exists(),
         rendered_exists=rp.exists(),
         mic_wav_exists=mp.exists(),
         events_exists=ep.exists(),
+        frame_index_exists=fp.exists(),
     )
 
 
@@ -653,6 +663,70 @@ def get_events(path: str = Query(..., description="Absolute path to source video
     if not ep.exists():
         raise HTTPException(404, f"no events file at {ep}")
     return AudioEventBundle.model_validate_json(ep.read_text())
+
+
+# ─── Semantic visual search (opt-in pipeline stage) ─────────────────────────
+
+
+class IndexFramesRequest(BaseModel):
+    """Build a CLIP frame-embedding index for a source so Cadence can
+    answer 'find the part where X is on screen' queries. Slow and opt-in
+    — runs as a background job."""
+    source_path: str
+
+
+@app.post("/index-frames", response_model=JobHandle)
+def index_frames_endpoint(req: IndexFramesRequest) -> JobHandle:
+    src = Path(req.source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+
+    job = _new_job("index_frames")
+
+    def run() -> None:
+        try:
+            job.status = "running"
+            cb = _progress_for(job)
+            from .vision import index_frames
+
+            out = frame_index_path(src)
+            n = index_frames(src, out, progress=cb)
+            job.finish(
+                "done",
+                result={"frame_index_path": str(out), "frame_count": n},
+            )
+        except Exception as e:
+            job.finish("error", error=str(e))
+
+    _executor.submit(run)
+    return JobHandle(job_id=job.id)
+
+
+class SearchContentRequest(BaseModel):
+    source_path: str
+    query: str
+    top_k: int = 5
+
+
+@app.post("/search-content")
+def search_content_endpoint(req: SearchContentRequest) -> dict[str, Any]:
+    """Search a previously-indexed source for visual matches to a text
+    query. Returns ranked timestamps with similarity scores. 404 if the
+    source isn't indexed yet — Cadence can use that signal to suggest
+    running the indexing pass."""
+    src = Path(req.source_path).expanduser()
+    if not src.exists():
+        raise HTTPException(404, f"source not found: {src}")
+    idx = frame_index_path(src)
+    if not idx.exists():
+        raise HTTPException(404, f"no frame index for {src} — run /index-frames first")
+    from .vision import search
+
+    try:
+        results = search(idx, req.query, top_k=req.top_k)
+    except Exception as e:
+        raise HTTPException(500, f"search failed: {e}") from e
+    return {"query": req.query, "results": results}
 
 
 SpeechEnhanceLevel = Literal["off", "low", "medium", "high"]

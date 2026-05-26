@@ -66,6 +66,12 @@ export function RightPanel({ onOpenReview }: Props) {
         <AudioEventsSection item={item} onRun={runStage} />
       </div>
 
+      {/* Visual search — optional CLIP frame-embedding index. Powers
+          "find clips where X is shown" via the Ask Cadence chat. */}
+      <div className="shrink-0 border-b border-border">
+        <VisualSearchSection item={item} onRun={runStage} />
+      </div>
+
       {/* Project Files — browse sources and accumulated renders for the
           active project. Collapsible, starts closed. */}
       <div className="shrink-0 border-b border-border">
@@ -297,6 +303,99 @@ function AudioEventsSection({
               className="w-full h-8 rounded-md bg-bg-elevated hover:bg-border text-text-primary text-xs font-medium transition-colors"
             >
               {done ? "Re-scan" : "▶ Scan for audio events"}
+            </button>
+          )}
+          {error && (
+            <div className="text-[10px] text-rose-400 mt-2" title={error}>
+              ✗ {error}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function VisualSearchSection({
+  item,
+  onRun,
+}: {
+  item: MediaItem;
+  onRun: (stage: "index_frames") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const done = !!item.pipeline.frameIndexPath;
+  const isRunning =
+    item.job?.stage === "index_frames" && !item.job.error;
+  const error =
+    item.job?.stage === "index_frames" && item.job.error
+      ? item.job.error
+      : null;
+
+  const statusText = isRunning
+    ? "indexing…"
+    : done
+    ? "✓ indexed"
+    : "not indexed";
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-bg-elevated transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-text-muted text-xs w-3 shrink-0">
+            {open ? "▾" : "▸"}
+          </span>
+          <h3 className="text-[10px] font-medium tracking-widest uppercase text-text-muted shrink-0">
+            Visual search
+          </h3>
+          {!open && (
+            <span
+              className={
+                "text-xs truncate " +
+                (done
+                  ? "text-emerald-400"
+                  : isRunning
+                  ? "text-accent"
+                  : "text-text-secondary")
+              }
+            >
+              {statusText}
+            </span>
+          )}
+        </div>
+      </button>
+      {open && (
+        <div className="px-3 pb-3">
+          <p className="text-[10px] text-text-secondary px-1 mb-2 leading-snug">
+            Build a CLIP frame-embedding index so Cadence can answer
+            "find the part where the walnut table is shown" or "where
+            the dog appears." Optional; only run when you want visual
+            search on this source. First run downloads a ~150MB CLIP
+            model.
+          </p>
+          {isRunning ? (
+            <div className="space-y-1.5 px-1">
+              <div className="h-1.5 bg-bg-elevated rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-accent transition-all duration-200"
+                  style={{
+                    width: `${Math.max(2, (item.job?.progress ?? 0) * 100)}%`,
+                  }}
+                />
+              </div>
+              <div className="text-[10px] text-text-secondary truncate">
+                {item.job?.message || "Indexing…"}
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => onRun("index_frames")}
+              className="w-full h-8 rounded-md bg-bg-elevated hover:bg-border text-text-primary text-xs font-medium transition-colors"
+            >
+              {done ? "Re-index" : "▶ Build visual search index"}
             </button>
           )}
           {error && (

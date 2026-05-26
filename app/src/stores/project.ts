@@ -19,6 +19,8 @@ export interface PipelineState {
   micWavPath?: string;
   /** Opt-in audio-event detection output (sniffles/throat clears/etc). */
   eventsPath?: string;
+  /** Opt-in CLIP frame-embedding index for visual semantic search. */
+  frameIndexPath?: string;
 }
 
 /**
@@ -38,7 +40,8 @@ export interface JobState {
     | "plan"
     | "render"
     | "render_audio"
-    | "detect_events";
+    | "detect_events"
+    | "index_frames";
   jobId?: string;       // undefined for sync stages (plan)
   progress: number;
   message: string;

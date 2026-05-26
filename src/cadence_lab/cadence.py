@@ -77,7 +77,33 @@ You have four mutation tools:
 - `propose_set_audio_setting` — enhance_speech, auto_duck, ducking_db.
 
 You **cannot** (yet): modify the splice timeline, add/remove blanks, move
-clips, trigger renders, or perform semantic search / computer vision.
+clips, or trigger renders directly.
+
+## Visual search ("find when X is on screen")
+
+CLIP frame embeddings power semantic search over what the camera sees —
+use `search_video_content` for queries like "find the walnut table",
+"find when the dog appears", "where is the speaker laughing".
+
+1. Call `search_video_content(query=...)` with a specific, concrete
+   description. CLIP rewards specifics: "walnut table" beats "table";
+   "person in a red jacket" beats "person".
+2. If it returns `status: "needs_index"`, tell the user that visual
+   search needs a one-time indexing pass (~1 min per 5 min of video)
+   and call `propose_run_visual_index` with a clear summary. The
+   conversation will auto-resume when indexing completes.
+3. If it returns results, present the top 3-5 as a brief text list with
+   timestamps. Don't pretend you can see the frames — you only have
+   similarity scores. Caveats matter: a low score (~0.20-0.25) means
+   "best guess but not confident"; ~0.30+ is a likely real match.
+4. Visual search **doesn't propose cuts on its own**. If the user wants
+   to act on a result (cut, highlight clip, etc.), follow up with the
+   appropriate propose tool.
+
+When to NOT use visual search:
+- "What did the speaker say about X?" → use `get_full_transcript`
+- "Where's that um at 1:23?" → use `list_fillers`
+- "Cut the throat clear" → use `list_audio_events`
 
 ## Audio events (sniffles, throat clears, coughs, lip smacks)
 
@@ -112,6 +138,7 @@ results. If a user asks to remove sniffles/coughs/etc:
 | Extract a short clip for YouTube / social / a compilation  | `propose_create_highlight_clip`  |
 | Change audio enhancement settings                          | `propose_set_audio_setting`      |
 | Remove sniffles / throat clears / coughs / lip smacks      | `list_audio_events` → `propose_add_custom_cut` per event |
+| Find moments by what's on screen (visual search)           | `search_video_content` |
 
 For custom cuts, **always use `get_transcript_around` first** to find the
 exact word boundaries, then propose the cut with those timestamps.
@@ -249,6 +276,41 @@ READ_TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "search_video_content",
+        "description": (
+            "Visually search the active source video for moments matching "
+            "a natural-language description. Uses CLIP frame embeddings.\n\n"
+            "Use this for queries about *what's on screen*: 'find when the "
+            "walnut table is shown', 'find the part where the speaker is "
+            "laughing', 'where does the dog appear'. Don't use for transcript "
+            "lookups — `get_transcript_around` is faster and more accurate.\n\n"
+            "Returns ranked `{time, score}` entries (score is cosine "
+            "similarity; ~0.25+ is a decent visual match, ~0.30+ is strong).\n\n"
+            "If the source hasn't been indexed yet, this returns "
+            "`{ status: 'needs_index' }`. In that case, tell the user the "
+            "visual index needs to be built (~1 min per 5 min of video) "
+            "and offer to kick it off via `propose_run_visual_index`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Plain-English description of what to find on "
+                        "screen. Be specific: 'walnut table' > 'table'; "
+                        "'person laughing' > 'laughing'."
+                    ),
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "How many ranked matches to return (default 5, max 20).",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "list_audio_events",
         "description": (
             "List non-speech audio events (sniffles, throat clears, coughs, "
@@ -293,6 +355,31 @@ READ_TOOLS: list[dict[str, Any]] = [
 ]
 
 ACTION_TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "propose_run_visual_index",
+        "description": (
+            "Propose building the visual search index (CLIP frame "
+            "embeddings) on the active source. Only use when "
+            "`search_video_content` returns `needs_index` and the user "
+            "agrees to wait (~1 min per 5 min of source video). The user "
+            "must explicitly Apply. Once it completes the system will "
+            "auto-continue the conversation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "One-line summary, e.g. 'Build visual search "
+                        "index (~3 min) so we can find when the walnut "
+                        "table is on screen.'"
+                    ),
+                },
+            },
+            "required": ["summary"],
+        },
+    },
     {
         "name": "propose_run_audio_event_scan",
         "description": (
@@ -617,6 +704,42 @@ def _dispatch_read_tool(
                     })
         return {"window_start": t - win, "window_end": t + win, "words": words}
 
+    if name == "search_video_content":
+        from .paths import frame_index_path
+        from .vision import search as vision_search
+
+        abs_src = ctx.active_source_abs()
+        if not abs_src:
+            return "No active source. The user needs to load one in the AI tab."
+        idx = frame_index_path(abs_src)
+        if not idx.exists():
+            return {
+                "status": "needs_index",
+                "message": (
+                    "Visual search index hasn't been built for this source. "
+                    "Propose `propose_run_visual_index` to kick it off."
+                ),
+            }
+        query = (args.get("query") or "").strip()
+        if not query:
+            return "search_video_content requires a non-empty `query`."
+        top_k = max(1, min(int(args.get("top_k") or 5), 20))
+        try:
+            results = vision_search(idx, query, top_k=top_k)
+        except Exception as e:
+            return f"search failed: {e}"
+        return {
+            "status": "ok",
+            "query": query,
+            "results": results,
+            "note": (
+                "Scores are CLIP cosine similarity; ~0.25 is a decent "
+                "match, ~0.30 is strong. Empty results mean the model "
+                "didn't see anything resembling the query above the "
+                "threshold (0.20)."
+            ),
+        }
+
     if name == "list_audio_events":
         from .models import AudioEventBundle
         from .paths import events_path
@@ -837,6 +960,12 @@ def _make_proposed_action(name: str, args: dict[str, Any]) -> ProposedAction:
     if name == "propose_run_audio_event_scan":
         return ProposedAction(
             type="run_audio_event_scan",
+            summary=summary,
+            params={},
+        )
+    if name == "propose_run_visual_index":
+        return ProposedAction(
+            type="run_visual_index",
             summary=summary,
             params={},
         )
