@@ -56,14 +56,22 @@ export interface JobState {
  */
 export type SpeechEnhanceLevel = "off" | "low" | "medium" | "high";
 
+/** "classical" = ffmpeg afftdn (spectral subtraction). Fast, no model.
+ *  "neural"   = DeepFilterNet (GRU model). Slower (~real-time on CPU,
+ *  first run downloads a ~6MB model) but significantly better on real-
+ *  world noise. */
+export type EnhanceEngine = "classical" | "neural";
+
 export interface AudioSettings {
   enhance_speech: SpeechEnhanceLevel;
+  enhance_engine: EnhanceEngine;
   auto_duck: boolean;
   ducking_db: number;  // negative; e.g. -8 lowers other tracks by 8 dB
 }
 
 export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
   enhance_speech: "off",
+  enhance_engine: "classical",
   auto_duck: false,
   ducking_db: -8,
 };

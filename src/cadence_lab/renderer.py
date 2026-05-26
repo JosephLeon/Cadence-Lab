@@ -169,6 +169,7 @@ def _build_filter_graph(
     auto_duck: bool = False,
     ducking_db: int = -8,
     source_audio_track_count: int = 1,
+    audio_input_index: int = 0,
 ) -> str:
     """Build the FFmpeg filter_complex graph for the cut plan.
 
@@ -201,7 +202,7 @@ def _build_filter_graph(
     # ─── Audio prologue: build the labeled "full audio" stream ────────────
     if audio_processed:
         # Step 1: enhance the mic track (or leave raw if no enhancement)
-        mic_in = f"[0:a:{audio_track_index}]"
+        mic_in = f"[{audio_input_index}:a:{audio_track_index}]"
         if enhance_chain:
             lines.append(f"{mic_in}{enhance_chain}[mic_clean]")
             mic_label = "[mic_clean]"
@@ -241,7 +242,7 @@ def _build_filter_graph(
         audio_inputs = [f"[a_src_{i}]" for i in range(n)]
     else:
         # Direct-input path — input pads can be referenced N times for free
-        audio_inputs = [f"[0:a:{audio_track_index}]" for _ in range(n)]
+        audio_inputs = [f"[{audio_input_index}:a:{audio_track_index}]" for _ in range(n)]
 
     # ─── Per-segment trim + fade ──────────────────────────────────────────
     for i, k in enumerate(plan.keeps):
@@ -294,6 +295,7 @@ def render(
     auto_duck: bool = False,
     ducking_db: int = -8,
     source_audio_track_count: int = 1,
+    external_audio_path: Path | None = None,
     progress: ProgressFn | None = None,
 ) -> Path:
     """Render the source video according to the cut plan.
@@ -328,13 +330,32 @@ def render(
             f"(encoder: {resolved_encoder}{audio_note})...",
         )
 
+    # When external_audio_path is set, route the audio input to a second
+    # ffmpeg -i (input index 1) instead of the source's audio track. The
+    # video is still input 0. This is how neural-denoised audio gets
+    # spliced in — DFN runs as a pre-pass, output WAV becomes the audio
+    # source for the encode.
+    use_external_audio = external_audio_path is not None
+    if use_external_audio:
+        audio_input_index = 1
+        # External WAV is mono speech — single track, index 0.
+        effective_track_index = 0
+        # The audio passed in IS the denoised output already; skip the
+        # in-graph afftdn chain to avoid double-processing.
+        effective_enhance = "off"
+    else:
+        audio_input_index = 0
+        effective_track_index = audio_track_index
+        effective_enhance = enhance_speech
+
     filter_graph = _build_filter_graph(
         plan,
-        audio_track_index,
-        enhance_speech=enhance_speech,
+        effective_track_index,
+        enhance_speech=effective_enhance,
         auto_duck=auto_duck,
         ducking_db=ducking_db,
         source_audio_track_count=source_audio_track_count,
+        audio_input_index=audio_input_index,
     )
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix="ve_filter_",
@@ -343,10 +364,13 @@ def render(
         graph_path = Path(f.name)
 
     try:
+        input_args: list[str] = ["-i", str(source)]
+        if use_external_audio:
+            input_args += ["-i", str(external_audio_path)]
         cmd = [
             "ffmpeg", "-y",
             "-hide_banner", "-loglevel", "warning",
-            "-i", str(source),
+            *input_args,
             "-filter_complex_script", str(graph_path),
             "-map", "[v_out]",
             "-map", "[a_out]",

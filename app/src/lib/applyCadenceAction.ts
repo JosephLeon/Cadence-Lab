@@ -1,6 +1,6 @@
 import type { ProposedAction } from "../api/types";
 import { useProject } from "../stores/project";
-import type { SpeechEnhanceLevel } from "../stores/project";
+import type { EnhanceEngine, SpeechEnhanceLevel } from "../stores/project";
 import { useSplicing } from "../stores/splicing";
 import { useCadence } from "../stores/cadence";
 import { useActiveProject } from "../stores/activeProject";
@@ -259,6 +259,14 @@ export function applyCadenceAction(action: ProposedAction): void {
         useProject
           .getState()
           .setAudio(sourcePath, { enhance_speech: value as SpeechEnhanceLevel });
+      } else if (setting === "enhance_engine") {
+        const allowed: EnhanceEngine[] = ["classical", "neural"];
+        if (typeof value !== "string" || !allowed.includes(value as EnhanceEngine)) {
+          throw new Error(`invalid enhance_engine value: ${String(value)}`);
+        }
+        useProject
+          .getState()
+          .setAudio(sourcePath, { enhance_engine: value as EnhanceEngine });
       } else if (setting === "auto_duck") {
         if (typeof value !== "boolean") {
           throw new Error(`auto_duck expects boolean, got ${typeof value}`);

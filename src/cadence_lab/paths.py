@@ -166,6 +166,7 @@ def rendered_path(
     auto_duck: bool = False,
     ducking_db: int = -8,
     source_audio_track_count: int = 1,
+    enhance_engine: str = "classical",
 ) -> Path:
     """Output path for a rendered MP4.
 
@@ -173,16 +174,21 @@ def rendered_path(
     coexist on disk and can be A/B compared. Examples:
 
         recording.edited.mp4                            # pacing only
-        recording.edited.enhance-medium.mp4             # + speech enhance
+        recording.edited.enhance-medium.mp4             # + classical enhance
+        recording.edited.enhance-medium-neural.mp4      # + DeepFilterNet
         recording.edited.enhance-high.duck-8.mp4        # + ducking
 
     Ducking only contributes to the filename when it would actually run
     (source has 2+ audio tracks) — otherwise it's a no-op and shouldn't
-    affect the output name.
+    affect the output name. Engine only contributes when enhance is on
+    (neural makes no sense without enhancement).
     """
     parts = [source.stem, "edited"]
     if enhance_speech != "off":
-        parts.append(f"enhance-{enhance_speech}")
+        tag = f"enhance-{enhance_speech}"
+        if enhance_engine == "neural":
+            tag += "-neural"
+        parts.append(tag)
     if auto_duck and source_audio_track_count > 1:
         parts.append(f"duck{ducking_db}")
     return project_dir(source) / (".".join(parts) + ".mp4")
@@ -190,6 +196,15 @@ def rendered_path(
 
 def mic_wav_path(source: Path) -> Path:
     return artifacts_dir(source) / f"{source.stem}.mic.16k.wav"
+
+
+def denoised_wav_path(source: Path, strength: str) -> Path:
+    """Where the DeepFilterNet-cleaned mic WAV is cached for a given source.
+
+    Strength is part of the filename so different denoise levels coexist on
+    disk and A/B comparison is free — re-rendering at the same strength
+    skips DFN entirely. The output is 48 kHz mono PCM (DFN's native rate)."""
+    return artifacts_dir(source) / f"{source.stem}.mic.denoised-{strength}.wav"
 
 
 def events_path(source: Path) -> Path:

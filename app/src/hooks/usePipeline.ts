@@ -205,6 +205,7 @@ export function usePipeline(mediaPath: string | null) {
                     plan_path: cur.pipeline.planPath,
                     audio: {
                       enhance_speech: cur.audio.enhance_speech,
+                      enhance_engine: cur.audio.enhance_engine,
                       auto_duck: cur.audio.auto_duck,
                       ducking_db: cur.audio.ducking_db,
                     },
@@ -224,6 +225,7 @@ export function usePipeline(mediaPath: string | null) {
                   source_path: mediaPath,
                   audio: {
                     enhance_speech: cur.audio.enhance_speech,
+                    enhance_engine: cur.audio.enhance_engine,
                     auto_duck: cur.audio.auto_duck,
                     ducking_db: cur.audio.ducking_db,
                   },

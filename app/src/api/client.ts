@@ -214,6 +214,7 @@ export const api = {
     audio_bitrate?: string;
     audio?: {
       enhance_speech: "off" | "low" | "medium" | "high";
+      enhance_engine: "classical" | "neural";
       auto_duck: boolean;
       ducking_db: number;
     };

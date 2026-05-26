@@ -53,6 +53,7 @@ export interface ProjectSource {
 
 export interface ProjectAudioSettings {
   enhance_speech: "off" | "low" | "medium" | "high";
+  enhance_engine: "classical" | "neural";
   auto_duck: boolean;
   ducking_db: number;
 }

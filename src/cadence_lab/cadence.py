@@ -74,7 +74,9 @@ You have four mutation tools:
   based on actual content. Propose 2–5 candidates, not one — let the user
   pick.
 
-- `propose_set_audio_setting` — enhance_speech, auto_duck, ducking_db.
+- `propose_set_audio_setting` — enhance_speech, enhance_engine
+  (classical=fast ffmpeg afftdn, neural=DeepFilterNet better on real-world
+  noise but slower), auto_duck, ducking_db.
 
 You **cannot** (yet): modify the splice timeline, add/remove blanks, move
 clips, or trigger renders directly.
@@ -528,19 +530,29 @@ ACTION_TOOLS: list[dict[str, Any]] = [
         "description": (
             "Propose changing an audio enhancement setting on the active "
             "source. Settings: enhance_speech (off/low/medium/high), "
-            "auto_duck (true/false), ducking_db (-24 to -2)."
+            "enhance_engine (classical/neural — neural=DeepFilterNet, "
+            "noticeably better on real-world noise but slower; classical="
+            "fast ffmpeg afftdn), auto_duck (true/false), ducking_db (-24 "
+            "to -2)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "setting": {
                     "type": "string",
-                    "enum": ["enhance_speech", "auto_duck", "ducking_db"],
+                    "enum": [
+                        "enhance_speech",
+                        "enhance_engine",
+                        "auto_duck",
+                        "ducking_db",
+                    ],
                 },
                 "value": {
                     "description": (
-                        "New value. String for enhance_speech, bool for "
-                        "auto_duck, number for ducking_db."
+                        "New value. String for enhance_speech "
+                        "(off/low/medium/high) or enhance_engine "
+                        "(classical/neural), bool for auto_duck, number "
+                        "for ducking_db."
                     ),
                 },
                 "summary": {"type": "string"},

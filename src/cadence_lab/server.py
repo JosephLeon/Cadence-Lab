@@ -85,6 +85,7 @@ from .paths import (
     analysis_path,
     cache_dir,
     classified_path,
+    denoised_wav_path,
     events_path,
     frame_index_path,
     mic_wav_path,
@@ -732,11 +733,19 @@ def search_content_endpoint(req: SearchContentRequest) -> dict[str, Any]:
 SpeechEnhanceLevel = Literal["off", "low", "medium", "high"]
 
 
+EnhanceEngine = Literal["classical", "neural"]
+
+
 class AudioSettings(BaseModel):
     """AI audio enhancement settings applied at render time. Lives inside
     RenderRequest. All optional — defaults to no enhancement."""
 
     enhance_speech: SpeechEnhanceLevel = "off"
+    # "classical" = ffmpeg's afftdn (spectral subtraction). Fast, light,
+    # decent for low-noise sources but can sound thin.
+    # "neural" = DeepFilterNet (GRU model on ~100k hrs of speech-noise).
+    # Significantly better on real-world noise; ~real-time on CPU.
+    enhance_engine: EnhanceEngine = "classical"
     auto_duck: bool = False
     ducking_db: int = -8  # negative: lowers other tracks by this much
 
@@ -880,7 +889,10 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
     render_id: str | None = None
     audio_suffix_parts: list[str] = []
     if req.audio and req.audio.enhance_speech != "off":
-        audio_suffix_parts.append(f"enhance-{req.audio.enhance_speech}")
+        tag = f"enhance-{req.audio.enhance_speech}"
+        if req.audio.enhance_engine == "neural":
+            tag += "-neural"
+        audio_suffix_parts.append(tag)
     if (
         req.audio
         and req.audio.auto_duck
@@ -909,6 +921,7 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
             auto_duck=(req.audio.auto_duck if req.audio else False),
             ducking_db=(req.audio.ducking_db if req.audio else -8),
             source_audio_track_count=audio_track_count,
+            enhance_engine=(req.audio.enhance_engine if req.audio else "classical"),
         )
 
     job = _new_job("render")
@@ -917,6 +930,48 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
         try:
             job.status = "running"
             cb = _progress_for(job)
+
+            # Neural pre-denoise. When engine == "neural" and enhancement is
+            # active, run DeepFilterNet on the source mic audio first and feed
+            # the cleaned WAV to ffmpeg as a second input. The renderer's
+            # external_audio_path branch swaps the mic stream for it and
+            # skips the in-graph afftdn chain so we don't double-process.
+            external_audio: Path | None = None
+            if (
+                req.audio
+                and req.audio.enhance_engine == "neural"
+                and req.audio.enhance_speech != "off"
+            ):
+                from .denoise import denoise_file, strength_to_atten_db
+
+                strength = req.audio.enhance_speech
+                cached = denoised_wav_path(src, strength)
+                if not cached.exists():
+                    cb(0.0, f"Extracting mic audio for neural denoise ({strength})…")
+                    mic_in = _ensure_decodable_audio(src)
+
+                    # DFN is the slow part; scale its internal progress into
+                    # the 0–0.3 band so the encode pass owns the rest.
+                    def dfn_progress(frac: float, msg: str) -> None:
+                        cb(min(0.3, max(0.0, frac) * 0.3), f"Denoising: {msg}")
+
+                    denoise_file(
+                        mic_in,
+                        cached,
+                        attenuation_lim_db=strength_to_atten_db(strength),
+                        progress=dfn_progress,
+                    )
+                external_audio = cached
+
+            # When external audio is in play, the renderer skips its own
+            # enhancement chain (the WAV is already cleaned), so pass "off"
+            # in that branch to avoid the filter graph re-running afftdn.
+            effective_enhance = (
+                "off"
+                if external_audio is not None
+                else (req.audio.enhance_speech if req.audio else "off")
+            )
+
             run_render(
                 source=src,
                 plan=plan,
@@ -924,10 +979,11 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
                 audio_track_index=track,
                 encoder=req.encoder,
                 audio_bitrate=req.audio_bitrate,
-                enhance_speech=(req.audio.enhance_speech if req.audio else "off"),
+                enhance_speech=effective_enhance,
                 auto_duck=(req.audio.auto_duck if req.audio else False),
                 ducking_db=(req.audio.ducking_db if req.audio else -8),
                 source_audio_track_count=audio_track_count,
+                external_audio_path=external_audio,
                 progress=cb,
             )
             size = out.stat().st_size

@@ -189,7 +189,11 @@ function describePipeline(item: MediaItem): string {
 
 function describeAudio(item: MediaItem): string {
   const a = item.audio;
-  const parts = [`enhance=${a.enhance_speech}`];
+  const enhanceTag =
+    a.enhance_speech === "off"
+      ? "off"
+      : `${a.enhance_speech} (${a.enhance_engine})`;
+  const parts = [`enhance=${enhanceTag}`];
   if (a.auto_duck) parts.push(`duck=${a.ducking_db}dB`);
   return `audio: ${parts.join(", ")}`;
 }

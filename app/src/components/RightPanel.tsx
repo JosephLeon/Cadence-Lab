@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type {
   AudioSettings,
+  EnhanceEngine,
   JobState,
   MediaItem,
   PipelineState,
@@ -712,13 +713,28 @@ function AudioTab({ item, onChange, onRender }: AudioTabProps) {
           sub="Denoise, dereverb, voice clarity boost. Adds time at render."
         />
         {audio.enhance_speech !== "off" && (
-          <div className="pt-2 pl-7 space-y-1">
-            <div className="text-[10px] text-text-secondary">Strength</div>
-            <SegmentedControl
-              options={["low", "medium", "high"] as const}
-              value={audio.enhance_speech as SpeechEnhanceLevel}
-              onChange={(v) => onChange({ enhance_speech: v })}
-            />
+          <div className="pt-2 pl-7 space-y-3">
+            <div className="space-y-1">
+              <div className="text-[10px] text-text-secondary">Strength</div>
+              <SegmentedControl
+                options={["low", "medium", "high"] as const}
+                value={audio.enhance_speech as SpeechEnhanceLevel}
+                onChange={(v) => onChange({ enhance_speech: v })}
+              />
+            </div>
+            <div className="space-y-1">
+              <div className="text-[10px] text-text-secondary">Engine</div>
+              <SegmentedControl
+                options={["classical", "neural"] as const}
+                value={audio.enhance_engine as EnhanceEngine}
+                onChange={(v) => onChange({ enhance_engine: v })}
+              />
+              <p className="text-[10px] text-text-muted leading-snug pt-1">
+                {audio.enhance_engine === "neural"
+                  ? "DeepFilterNet — better on real-world noise (HVAC, keyboard, room). First run downloads ~6MB model. Slower."
+                  : "ffmpeg afftdn — fast spectral denoise. Good for low hum / static. Can sound thin on louder noise."}
+              </p>
+            </div>
           </div>
         )}
       </Section>
