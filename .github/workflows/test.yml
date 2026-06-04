@@ -1,0 +1,100 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-flight runs when a new commit lands on the same branch/PR —
+# saves CI minutes on rapid pushes, and you only care about the latest.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          # Pin the uv version that matches what the project's build-system
+          # requires (pyproject.toml uses uv_build>=0.11.15,<0.12.0).
+          version: "0.11.x"
+          enable-cache: true
+
+      - name: Sync dependencies
+        # The heavy deps (torch, open_clip, deepfilternet, panns) install
+        # from prebuilt wheels on Linux — slow first run, fast subsequent
+        # runs thanks to enable-cache above.
+        run: uv sync --frozen --group dev
+
+      - name: Run tests
+        # Tests are pure-logic (planner, reviewer, paths, projects, keys);
+        # no ffmpeg / no model downloads required. ~50ms wall time.
+        run: uv run pytest
+
+  frontend:
+    name: tsc --noEmit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend deps
+        working-directory: app
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: app
+        run: bun run tsc --noEmit
+
+  rust:
+    # Only the Rust shell — Tauri shell sources + custom keychain commands.
+    # Doesn't build the full app bundle (that would need GUI deps + matrix
+    # builds and isn't useful as a per-commit gate).
+    name: cargo check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Tauri system deps
+        # Tauri on Linux needs the webkit2gtk + appindicator + libsecret
+        # (for the keyring crate's linux-native-sync-persistent feature).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libsecret-1-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            app/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo check
+        working-directory: app/src-tauri
+        run: cargo check --locked

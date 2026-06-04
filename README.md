@@ -198,14 +198,39 @@ cp .env.example .env       # then add your keys
 cd app && bun install && cd ..
 ```
 
-You need two API keys:
+You need two API keys (paste them into the in-app Settings panel — gear
+icon top-right — and they're stored in your OS keychain; the `.env`
+route below is the dev fallback):
 
-- **`GROQ_API_KEY`** — for transcription. Whisper-large-v3 hosted by Groq runs
-  at ~30× realtime for ~$0.05 per 30 minutes of audio. Get one at
-  <https://console.groq.com/keys>.
-- **`ANTHROPIC_API_KEY`** — for Claude Opus 4.7 (classifier + Ask Cadence).
-  ~$0.50–$2 per 30-minute video depending on how much you chat. Get one at
+- **Anthropic** — Claude Opus 4.7 (classifier + Ask Cadence). ~$0.50–$2
+  per 30-minute video depending on how much you chat.
   <https://console.anthropic.com/settings/keys>.
+- **Groq** — hosted Whisper transcription (~30× realtime, ~$0.05 per
+  30 min). Optional if you use the local Whisper backend.
+  <https://console.groq.com/keys>.
+
+Dev fallback — set them in `.env` if you'd rather:
+
+```sh
+GROQ_API_KEY=...
+ANTHROPIC_API_KEY=...
+```
+
+### Model downloads on first use
+
+`uv sync` only installs Python packages. The actual ML models download
+lazily the first time each feature is used. Plan for:
+
+| Model | Triggers when… | Size | Cached at |
+|---|---|---|---|
+| Silero VAD | first analyze | ~2 MB | `~/.cache/torch/hub/` |
+| CLIP ViT-B/32 | first visual search index | ~150 MB | `~/.cache/clip/` |
+| DeepFilterNet | first neural denoise render | ~6 MB | `~/.cache/deepfilternet/` |
+| PANNs CNN14 | first audio-event scan | ~320 MB | `~/.cache/panns_data/` |
+| Whisper large-v3 (local backend only) | first analyze with `--backend local` | ~1.5 GB | `~/.cache/huggingface/` |
+
+Groq + the default Anthropic Cadence + classifier paths don't download
+anything — they're cloud calls.
 
 ### Launch the desktop app
 

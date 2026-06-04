@@ -43,3 +43,6 @@ app/src-tauri/gen/schemas/
 .DS_Store
 .vscode/
 .idea/
+
+# Claude Code session state — local-machine memory, never tracked
+.claude/
