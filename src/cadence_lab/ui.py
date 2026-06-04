@@ -536,12 +536,16 @@ if st.session_state.probe is not None:
             ),
         )
         if backend == "groq":
-            if os.getenv("GROQ_API_KEY"):
-                st.caption(":green[✓ GROQ_API_KEY detected]")
+            from . import keys as _keys
+
+            if _keys.is_configured("groq"):
+                st.caption(":green[✓ Groq API key detected]")
             else:
                 st.warning(
-                    "GROQ_API_KEY not set. Add it to `.env` (see `.env.example`) "
-                    "and restart, or switch to the local backend."
+                    "Groq API key not set. Add it to `.env` (see `.env.example`) "
+                    "and restart, or switch to the local backend. "
+                    "(The Tauri Settings panel stores keys per-session in the "
+                    "sidecar — for the Streamlit UI use the `.env` route.)"
                 )
             model_size = "large-v3"
             compute_type = "int8"  # ignored by groq backend, kept for shape
@@ -631,13 +635,17 @@ if st.session_state.analysis_bundle is not None:
         "filler word gets cut/keep, and retakes are detected."
     )
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
+    from . import keys as _keys
+
+    anthropic_ready = _keys.is_configured("anthropic")
+    if not anthropic_ready:
         st.warning(
-            "ANTHROPIC_API_KEY not set. Add it to `.env` (see `.env.example`) "
-            "and relaunch."
+            "Anthropic API key not set. Add it to `.env` (see `.env.example`) "
+            "and relaunch. (The Tauri Settings panel stores keys per-session "
+            "in the sidecar — for the Streamlit UI use the `.env` route.)"
         )
     else:
-        st.caption(":green[✓ ANTHROPIC_API_KEY detected]")
+        st.caption(":green[✓ Anthropic API key detected]")
 
     min_pause_ms = st.slider(
         "Minimum pause (ms) to classify",
@@ -649,7 +657,7 @@ if st.session_state.analysis_bundle is not None:
     run_cls = st.button(
         "▶ Run classification",
         type="primary",
-        disabled=not os.getenv("ANTHROPIC_API_KEY"),
+        disabled=not anthropic_ready,
     )
 
     if run_cls:

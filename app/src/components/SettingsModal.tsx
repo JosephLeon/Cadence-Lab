@@ -1,43 +1,59 @@
 import { useEffect, useState } from "react";
-import { api, type KeysStatusResponse, type KeysValidateResponse } from "../api/client";
+import { useQueryClient } from "@tanstack/react-query";
+import { api, type KeysValidateResponse } from "../api/client";
+import { invalidateKeysStatus, useKeysStatus } from "../hooks/useKeysStatus";
 import { keychainDelete, keychainGet, keychainSet } from "../lib/keystore";
 
 /**
  * Settings modal — API key management.
  *
  * Flow:
- * 1. On open, read both keys from the OS keychain and populate the masked
- *    inputs. Also fetch the sidecar's view of what's active so we can show
- *    e.g. "Active key loaded from .env" when the user hasn't typed one.
- * 2. On Save, write each non-empty input to the keychain (or delete on
- *    explicit clear), then push to the sidecar via setKeys(), then run
- *    validateKeys() to ping each provider and surface ✓/✗ inline.
+ * 1. On mount, read both keys from the OS keychain to populate the masked
+ *    inputs. The sidecar's view of what's active comes from the shared
+ *    useKeysStatus hook so this modal automatically sees updates from
+ *    App.tsx's mount-time keychain→sidecar push.
+ * 2. On Save, diff each input against its mount-time value. Only fields
+ *    the user actually changed get pushed — untouched fields aren't sent
+ *    (so they don't accidentally clear an env-var-backed key the user
+ *    never meant to touch).
+ * 3. Validation pings the providers. Status auto-refreshes via
+ *    invalidateKeysStatus, so WelcomeScreen's banner reflects the new
+ *    state without a second round-trip.
  *
- * The actual key value is never persisted in component state longer than
- * it needs to be — closing the modal drops it.
+ * Actual key values never persist in component state longer than they
+ * need to be — closing the modal drops them.
  */
 export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [anthropic, setAnthropic] = useState("");
   const [groq, setGroq] = useState("");
-  const [status, setStatus] = useState<KeysStatusResponse | null>(null);
+  // Mount-time snapshots so Save can diff and only send modified fields.
+  // Empty string here means "no keychain entry" — distinct from "user
+  // typed empty" which only happens after they explicitly cleared it.
+  const [originalAnthropic, setOriginalAnthropic] = useState("");
+  const [originalGroq, setOriginalGroq] = useState("");
   const [validation, setValidation] = useState<KeysValidateResponse | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // On mount: load from keychain + ask sidecar for its current view.
+  const queryClient = useQueryClient();
+  const { data: status } = useKeysStatus();
+
+  // On mount: load keychain values to populate the inputs.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [a, g, s] = await Promise.all([
+        const [a, g] = await Promise.all([
           keychainGet("anthropic"),
           keychainGet("groq"),
-          api.keysStatus().catch(() => null),
         ]);
         if (cancelled) return;
-        if (a) setAnthropic(a);
-        if (g) setGroq(g);
-        setStatus(s);
+        const aVal = a ?? "";
+        const gVal = g ?? "";
+        setAnthropic(aVal);
+        setGroq(gVal);
+        setOriginalAnthropic(aVal);
+        setOriginalGroq(gVal);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
@@ -61,28 +77,47 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     setError(null);
     setValidation(null);
     try {
-      // 1. Persist to the keychain — set non-empty, delete on clear.
-      await Promise.all([
-        anthropic
-          ? keychainSet("anthropic", anthropic.trim())
-          : keychainDelete("anthropic"),
-        groq ? keychainSet("groq", groq.trim()) : keychainDelete("groq"),
-      ]);
-      // 2. Push to the sidecar — empty string is the "clear in-memory"
-      // sentinel; only send fields the user typed something into so we
-      // don't accidentally wipe the env-var fallback when an input was
-      // pre-populated and untouched.
-      await api.setKeys({
-        anthropic: anthropic.trim() || "",
-        groq: groq.trim() || "",
-      });
-      // 3. Live-check both providers + refresh status.
-      const [newStatus, v] = await Promise.all([
-        api.keysStatus(),
-        api.validateKeys(),
-      ]);
-      setStatus(newStatus);
-      setValidation(v);
+      const anthropicTrim = anthropic.trim();
+      const groqTrim = groq.trim();
+      const anthropicChanged = anthropicTrim !== originalAnthropic.trim();
+      const groqChanged = groqTrim !== originalGroq.trim();
+
+      // 1. Persist to the keychain — only for fields the user changed.
+      //    Non-empty → set; empty → delete (explicit clear).
+      const keychainOps: Promise<unknown>[] = [];
+      if (anthropicChanged) {
+        keychainOps.push(
+          anthropicTrim
+            ? keychainSet("anthropic", anthropicTrim)
+            : keychainDelete("anthropic"),
+        );
+      }
+      if (groqChanged) {
+        keychainOps.push(
+          groqTrim ? keychainSet("groq", groqTrim) : keychainDelete("groq"),
+        );
+      }
+      await Promise.all(keychainOps);
+
+      // 2. Push to the sidecar — only the changed fields. The setKeys
+      //    contract: omit = leave alone, empty string = clear in-memory.
+      const patch: { anthropic?: string; groq?: string } = {};
+      if (anthropicChanged) patch.anthropic = anthropicTrim;
+      if (groqChanged) patch.groq = groqTrim;
+      if (Object.keys(patch).length > 0) {
+        await api.setKeys(patch);
+        // Update mount-snapshots so subsequent Saves diff against the
+        // new baseline (user can hit Save twice without re-clearing).
+        if (anthropicChanged) setOriginalAnthropic(anthropicTrim);
+        if (groqChanged) setOriginalGroq(groqTrim);
+      }
+
+      // 3. Refresh the shared cache so the WelcomeScreen banner and any
+      //    other consumer of useKeysStatus see the new state.
+      await invalidateKeysStatus(queryClient);
+
+      // 4. Live-check both providers.
+      setValidation(await api.validateKeys());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

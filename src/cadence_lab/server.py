@@ -288,36 +288,68 @@ def validate_keys() -> KeysValidateResponse:
     checkmark before closing the dialog (or a red one if they pasted a
     typo). Each check is wrapped — a network error or bad key reports as
     ``ok=False`` with the error text, not a 500.
+
+    Both providers are checked concurrently and with a short explicit
+    timeout. The Anthropic SDK default timeout is 600s; without an
+    override, a typo'd key on a slow network would hang the Settings
+    modal for up to 10 minutes. ImportError is reported as a distinct
+    error message so a broken install doesn't masquerade as 'your key is
+    invalid'.
     """
-    results: dict[str, KeyValidation] = {}
 
-    # Anthropic — cheapest check is models.list().
-    if _keys_mod.is_configured("anthropic"):
+    def _check_anthropic() -> KeyValidation:
+        if not _keys_mod.is_configured("anthropic"):
+            return KeyValidation(ok=None)
         try:
-            import anthropic
-
-            client = anthropic.Anthropic(api_key=_keys_mod.get_key("anthropic"))
-            client.models.list()
-            results["anthropic"] = KeyValidation(ok=True)
-        except Exception as e:
-            results["anthropic"] = KeyValidation(ok=False, error=str(e)[:200])
-    else:
-        results["anthropic"] = KeyValidation(ok=None)
-
-    # Groq — same idea.
-    if _keys_mod.is_configured("groq"):
+            import anthropic  # type: ignore
+        except ImportError as e:
+            return KeyValidation(
+                ok=False,
+                error=f"Anthropic SDK not installed: {e}",
+            )
         try:
-            from groq import Groq
-
-            client = Groq(api_key=_keys_mod.get_key("groq"))
+            client = anthropic.Anthropic(
+                api_key=_keys_mod.get_key("anthropic"),
+                timeout=5.0,
+                max_retries=0,
+            )
             client.models.list()
-            results["groq"] = KeyValidation(ok=True)
+            return KeyValidation(ok=True)
         except Exception as e:
-            results["groq"] = KeyValidation(ok=False, error=str(e)[:200])
-    else:
-        results["groq"] = KeyValidation(ok=None)
+            return KeyValidation(ok=False, error=str(e)[:200])
 
-    return KeysValidateResponse(**results)
+    def _check_groq() -> KeyValidation:
+        if not _keys_mod.is_configured("groq"):
+            return KeyValidation(ok=None)
+        try:
+            from groq import Groq  # type: ignore
+        except ImportError as e:
+            return KeyValidation(
+                ok=False,
+                error=f"Groq SDK not installed: {e}",
+            )
+        try:
+            client = Groq(
+                api_key=_keys_mod.get_key("groq"),
+                timeout=5.0,
+                max_retries=0,
+            )
+            client.models.list()
+            return KeyValidation(ok=True)
+        except Exception as e:
+            return KeyValidation(ok=False, error=str(e)[:200])
+
+    # Run both checks in parallel — independent network roundtrips, no
+    # reason to serialize them.
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        anthropic_future = pool.submit(_check_anthropic)
+        groq_future = pool.submit(_check_groq)
+        return KeysValidateResponse(
+            anthropic=anthropic_future.result(),
+            groq=groq_future.result(),
+        )
 
 
 # ─── Projects ────────────────────────────────────────────────────────────────
@@ -406,6 +438,8 @@ def remove_source_endpoint(
         project = _projects_mod.load_project(slug)
     except _projects_mod.ProjectNotFound as e:
         raise HTTPException(404, str(e))
+    except _projects_mod.ProjectError as e:
+        raise HTTPException(400, f"invalid project slug: {e}")
     removed = _projects_mod.remove_source(
         project, path, delete_copied_file=delete_file
     )
@@ -427,6 +461,8 @@ def add_source_endpoint(
         project = _projects_mod.load_project(slug)
     except _projects_mod.ProjectNotFound as e:
         raise HTTPException(404, str(e))
+    except _projects_mod.ProjectError as e:
+        raise HTTPException(400, f"invalid project slug: {e}")
     try:
         _projects_mod.add_source(project, Path(req.path), mode=req.mode)
     except _projects_mod.ProjectError as e:
@@ -1025,6 +1061,10 @@ def render_endpoint(req: RenderRequest) -> JobHandle:
             project = _projects_mod.load_project(req.project_slug)
         except _projects_mod.ProjectNotFound as e:
             raise HTTPException(404, f"project not found: {e}")
+        except _projects_mod.ProjectError as e:
+            # _project_dir's slug-validation guard raises ProjectError on
+            # malformed/escape slugs; surface as 400, not 500.
+            raise HTTPException(400, f"invalid project slug: {e}")
         render_id = _projects_mod.next_render_id(project)
         renders_dir = _projects_mod.project_dir_path(project.slug) / "renders"
         renders_dir.mkdir(parents=True, exist_ok=True)
@@ -1236,6 +1276,10 @@ def splice_render_endpoint(req: SpliceRequest) -> JobHandle:
             project = _projects_mod.load_project(req.project_slug)
         except _projects_mod.ProjectNotFound as e:
             raise HTTPException(404, f"project not found: {e}")
+        except _projects_mod.ProjectError as e:
+            # _project_dir's slug-validation guard raises ProjectError on
+            # malformed/escape slugs; surface as 400, not 500.
+            raise HTTPException(400, f"invalid project slug: {e}")
         render_id = _projects_mod.next_render_id(project)
         renders_dir = _projects_mod.project_dir_path(project.slug) / "renders"
         renders_dir.mkdir(parents=True, exist_ok=True)
@@ -1352,6 +1396,10 @@ def cadence_query(req: CadenceQueryRequest) -> CadenceQueryResponse:
         project = _projects_mod.load_project(req.project_slug)
     except _projects_mod.ProjectNotFound as e:
         raise HTTPException(404, str(e))
+    except _projects_mod.ProjectError as e:
+        # _project_dir's slug-validation guard raises ProjectError on
+        # malformed/escape slugs; surface as 400, not 500.
+        raise HTTPException(400, f"invalid project slug: {e}")
 
     history = [
         _cadence_mod.CadenceMessage(role=t.role, text=t.text)

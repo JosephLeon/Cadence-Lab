@@ -101,6 +101,27 @@ def test_slug_escape_attempts_are_rejected(isolated_projects_root: Path):
             _project_dir(bad)
 
 
+def test_slug_with_path_separators_rejected(isolated_projects_root: Path):
+    """Nested slugs (e.g. ``foo/bar``) resolve inside the root but cause
+    ``create_project`` to silently create ghost subdirectories that
+    ``list_projects`` can't see. Reject at the chokepoint."""
+    from cadence_lab.projects import ProjectError, _project_dir
+
+    for bad in ("a/b", "a/b/c", "a\\b", "with\x00null", ""):
+        with pytest.raises(ProjectError):
+            _project_dir(bad)
+
+
+def test_slug_with_leading_dot_rejected(isolated_projects_root: Path):
+    """Hidden-dot prefixes confuse file pickers and the project list.
+    Reject explicitly so projects are never invisible to the UI."""
+    from cadence_lab.projects import ProjectError, _project_dir
+
+    for bad in (".hidden", ".", ".."):
+        with pytest.raises(ProjectError):
+            _project_dir(bad)
+
+
 def test_save_project_is_atomic_no_tempfile_leak(isolated_projects_root: Path):
     """The atomic write pattern (tempfile + rename) must not leave .tmp
     files behind on success — they'd show up in the project dir listing."""

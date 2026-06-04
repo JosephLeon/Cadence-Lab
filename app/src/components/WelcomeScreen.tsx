@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { useActiveProject } from "../stores/activeProject";
+import { useKeysStatus } from "../hooks/useKeysStatus";
 import type { ProjectSummary } from "../api/types";
 
 /**
@@ -21,12 +22,9 @@ export function WelcomeScreen({
   // Surface a "your AI keys aren't set" banner so first-launch users
   // know they need to do this before pipeline / Cadence actions work.
   // Non-blocking — render-only / splice-only flows still function.
-  const keysStatusQuery = useQuery({
-    queryKey: ["keys-status"],
-    queryFn: () => api.keysStatus(),
-    staleTime: 30_000,
-    retry: 3,
-  });
+  // Uses the shared keys-status cache so App.tsx's mount-time push
+  // invalidates this view too (no 30s lag showing stale "missing keys").
+  const keysStatusQuery = useKeysStatus();
   const anthropicMissing = keysStatusQuery.data?.anthropic.set === false;
   const groqMissing = keysStatusQuery.data?.groq.set === false;
   const someKeyMissing = anthropicMissing || groqMissing;

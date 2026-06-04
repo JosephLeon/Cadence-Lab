@@ -38,32 +38,41 @@ _IN_MEMORY: dict[Provider, str] = {}
 def set_key(provider: Provider, value: str | None) -> None:
     """Store an in-memory key. Passing ``None`` or empty string clears it.
 
+    Whitespace is stripped before storage — keychain entries imported from
+    other tools (or written by older versions of the app) sometimes carry
+    trailing newlines, and SDKs reject those with an opaque 401 rather
+    than a clean validation error.
+
     Thread-safe — the FastAPI sidecar runs request handlers across a
     threadpool and the Cadence query path lazily constructs clients.
     """
     with _LOCK:
-        if not value:
+        if not value or not value.strip():
             _IN_MEMORY.pop(provider, None)
         else:
-            _IN_MEMORY[provider] = value
+            _IN_MEMORY[provider] = value.strip()
 
 
-def _env_var_for(provider: Provider) -> str:
-    return {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "groq": "GROQ_API_KEY",
-    }[provider]
+_ENV_VARS: dict[Provider, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "groq": "GROQ_API_KEY",
+}
 
 
 def get_key(provider: Provider) -> str | None:
     """Return the active key for ``provider`` or ``None`` if neither
-    source has one. In-memory wins over the env var."""
+    source has one. In-memory wins over the env var.
+
+    The lock is held across both lookups so a concurrent ``set_key`` can't
+    race with us — without that, a reader can see an empty in-memory entry,
+    release the lock, then read a stale (or absent) env var while the
+    writer's new key is already in memory."""
     with _LOCK:
         mem = _IN_MEMORY.get(provider)
-    if mem:
-        return mem
-    env = os.getenv(_env_var_for(provider), "").strip()
-    return env or None
+        if mem:
+            return mem
+        env = os.getenv(_ENV_VARS[provider], "").strip()
+        return env or None
 
 
 def is_configured(provider: Provider) -> bool:
@@ -72,10 +81,11 @@ def is_configured(provider: Provider) -> bool:
 
 def source_of(provider: Provider) -> Literal["in_memory", "env", "unset"]:
     """Where the active key came from — surfaced in the settings UI so the
-    user can tell whether their typed-in key or their ``.env`` is winning."""
+    user can tell whether their typed-in key or their ``.env`` is winning.
+    Same lock-held semantics as ``get_key`` so the two stay consistent."""
     with _LOCK:
         if provider in _IN_MEMORY:
             return "in_memory"
-    if os.getenv(_env_var_for(provider), "").strip():
-        return "env"
-    return "unset"
+        if os.getenv(_ENV_VARS[provider], "").strip():
+            return "env"
+        return "unset"

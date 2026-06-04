@@ -183,13 +183,29 @@ def _now_iso() -> str:
 def _project_dir(slug: str) -> Path:
     """Resolve a slug to an absolute path inside ``projects_root()``.
 
-    Refuses any slug that resolves outside the projects root. This is the
-    chokepoint for both URL-supplied slugs (FastAPI usually normalizes
-    them, but defense-in-depth) and slugs read out of ``project.json``
-    manifests on disk — a malicious project share could otherwise ship a
-    ``slug: "../../tmp/pwned"`` field and divert render writes to an
-    attacker-chosen location. Mirrors the guard already in
-    ``delete_project``."""
+    This is the chokepoint for every slug — URL-supplied (FastAPI usually
+    normalizes them, but defense-in-depth) and slugs read out of
+    ``project.json`` manifests on disk (a malicious project share could
+    otherwise ship a ``slug: "../../tmp/pwned"`` field and divert render
+    writes to an attacker-chosen location).
+
+    Three rejection rules, in order:
+
+    1. **Path separators** — slugs are directory names, never paths. A
+       slug like ``"a/b/c"`` would resolve inside the root, but
+       ``create_project``'s ``mkdir(parents=True)`` would silently create
+       nested ghost dirs that ``list_projects`` can't see.
+    2. **Leading dot** — refuses ``".hidden"``, ``".."``, etc. Hidden
+       project dirs are invisible in standard file pickers and confuse
+       the projects listing.
+    3. **Containment** — the resolved path must be inside ``projects_root``.
+       Catches anything the first two rules missed (e.g. exotic Unicode
+       path separators interpreted by the filesystem).
+    """
+    if not slug or "/" in slug or "\\" in slug or "\x00" in slug:
+        raise ProjectError(f"slug contains a path separator: {slug!r}")
+    if slug.startswith("."):
+        raise ProjectError(f"slug starts with a dot: {slug!r}")
     root = projects_root()
     candidate = (root / slug).resolve()
     try:
