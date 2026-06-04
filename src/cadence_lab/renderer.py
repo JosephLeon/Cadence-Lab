@@ -62,6 +62,39 @@ EncoderChoice = Literal["auto", "h264_videotoolbox", "libx264"]
 # ─── Encoder detection / arg construction ────────────────────────────────────
 
 
+@functools.lru_cache(maxsize=64)
+def _source_has_audio(path: Path) -> bool:
+    """Return True if ``path`` contains at least one audio stream.
+
+    Used by the splice renderer to detect video-only inputs (silent
+    screen recordings are the common case) and substitute a synthetic
+    silent audio track for the missing ``[N:a]`` stream — otherwise the
+    filter graph fails with "Stream specifier ':a' matches no streams".
+
+    Cached because the same source can appear multiple times in a splice
+    timeline; one ffprobe per file is plenty."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        # Conservative fallback: assume audio exists. If it doesn't, the
+        # render fails the same way it would without this check — at
+        # least the error surface stays the same.
+        return True
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "a",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return True  # same conservative fallback
+    return "audio" in proc.stdout
+
+
 @functools.lru_cache(maxsize=1)
 def _supports_videotoolbox() -> bool:
     """Check whether ffmpeg has the ``h264_videotoolbox`` encoder compiled in."""
@@ -493,8 +526,23 @@ def splice_render(
             f"({total:.1f}s total, encoder: {resolved_encoder})...",
         )
 
+    # Probe each unique source once for whether it has an audio stream.
+    # Video-only inputs (e.g. silent screen recordings from Cmd+Shift+5
+    # without audio capture) would otherwise blow up the filter graph at
+    # the [N:a] reference. We synthesize silence for those clips.
+    audio_presence: dict[str, bool] = {}
+    for c in clips:
+        if c.kind == "video" and c.source_path is not None:
+            key = str(c.source_path)
+            if key not in audio_presence:
+                audio_presence[key] = _source_has_audio(Path(c.source_path))
+
     # Build -i input flags + record each clip's input index. Blank clips
-    # consume two inputs (video + audio); video clips consume one.
+    # consume two inputs (video + audio); video clips consume one — plus
+    # a parallel anullsrc lavfi input if the source has no audio of its
+    # own. (We add a separate anullsrc per silent clip rather than one
+    # shared source because each clip has its own trim range and lavfi
+    # sources need an explicit `d=` covering the trim end.)
     input_args: list[str] = []
     # For each clip, store (video_input_index, audio_input_index).
     clip_inputs: list[tuple[int, int]] = []
@@ -502,8 +550,24 @@ def splice_render(
     for c in clips:
         if c.kind == "video":
             input_args += ["-i", str(c.source_path)]
-            clip_inputs.append((next_idx, next_idx))
+            vid_idx = next_idx
             next_idx += 1
+            if audio_presence.get(str(c.source_path), False):
+                aud_idx = vid_idx  # same input, has audio
+            else:
+                # Silence covering this clip's trim range. anullsrc's `d=`
+                # is the source duration; we then atrim into it the same
+                # way we do for real audio inputs, so source_end seconds
+                # of silence is enough.
+                input_args += [
+                    "-f", "lavfi",
+                    "-i",
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000:"
+                    f"d={max(c.source_end, 0.001):.6f}",
+                ]
+                aud_idx = next_idx
+                next_idx += 1
+            clip_inputs.append((vid_idx, aud_idx))
         else:
             input_args += [
                 "-f", "lavfi",

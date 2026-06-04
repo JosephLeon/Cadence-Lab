@@ -15,7 +15,7 @@ Built because every "auto-edit silence" tool I tried was a regex over the
 waveform. This one actually thinks about each pause, and now you can talk
 to it.
 
-> 🎬 _Demo GIF / screenshot goes here — record once the UI is polished_
+![Cadence Lab demo](docs/demo.gif)
 
 ---
 
