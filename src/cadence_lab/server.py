@@ -1461,10 +1461,17 @@ async def stream_job_events(job_id: str) -> StreamingResponse:
 
 
 def _resolve_output_file(name: str) -> Path:
-    """Path-traversal-safe lookup inside the configured output directory."""
-    out = output_dir()
+    """Path-traversal-safe lookup inside the configured output directory.
+
+    Uses ``Path.relative_to`` to verify containment instead of a string
+    ``startswith`` prefix check — the latter falsely accepts sibling dirs
+    whose name shares a prefix (e.g. ``files-backup/`` next to ``files/``).
+    """
+    out = output_dir().resolve()
     target = (out / name).resolve()
-    if not str(target).startswith(str(out.resolve())):
+    try:
+        target.relative_to(out)
+    except ValueError:
         raise HTTPException(403, "path escapes output directory")
     if not target.exists():
         raise HTTPException(404, f"file not found: {name}")

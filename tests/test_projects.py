@@ -89,6 +89,18 @@ def test_load_unknown_project_raises_not_found(isolated_projects_root: Path):
         load_project("does-not-exist")
 
 
+def test_slug_escape_attempts_are_rejected(isolated_projects_root: Path):
+    """Defense against a malicious project share: a manifest carrying
+    ``slug: "../../tmp/pwned"`` must not let the renderer write outside
+    the projects root. ``_project_dir`` is the chokepoint and refuses
+    any slug that resolves outside the configured root."""
+    from cadence_lab.projects import ProjectError, _project_dir
+
+    for bad in ("../escape", "../../tmp/pwned", "..", "foo/../../escape"):
+        with pytest.raises(ProjectError):
+            _project_dir(bad)
+
+
 def test_save_project_is_atomic_no_tempfile_leak(isolated_projects_root: Path):
     """The atomic write pattern (tempfile + rename) must not leave .tmp
     files behind on success — they'd show up in the project dir listing."""

@@ -35,7 +35,23 @@ struct SidecarHandle(Mutex<Option<Child>>);
 
 const KEYCHAIN_SERVICE: &str = "com.cadencelab.app";
 
+/// Explicit allowlist for the `account` parameter on every keychain
+/// command. Defense-in-depth against any future XSS / supply-chain
+/// compromise in the webview — a malicious script that gets `invoke`
+/// access can't enumerate or fish for keys under arbitrary names
+/// outside the providers we actually use.
+const ALLOWED_ACCOUNTS: &[&str] = &["anthropic", "groq"];
+
+fn validate_account(account: &str) -> Result<(), String> {
+  if ALLOWED_ACCOUNTS.contains(&account) {
+    Ok(())
+  } else {
+    Err(format!("disallowed account: {}", account))
+  }
+}
+
 fn keychain_entry(account: &str) -> Result<Entry, String> {
+  validate_account(account)?;
   Entry::new(KEYCHAIN_SERVICE, account).map_err(|e| e.to_string())
 }
 

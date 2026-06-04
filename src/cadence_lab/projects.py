@@ -181,7 +181,22 @@ def _now_iso() -> str:
 
 
 def _project_dir(slug: str) -> Path:
-    return projects_root() / slug
+    """Resolve a slug to an absolute path inside ``projects_root()``.
+
+    Refuses any slug that resolves outside the projects root. This is the
+    chokepoint for both URL-supplied slugs (FastAPI usually normalizes
+    them, but defense-in-depth) and slugs read out of ``project.json``
+    manifests on disk — a malicious project share could otherwise ship a
+    ``slug: "../../tmp/pwned"`` field and divert render writes to an
+    attacker-chosen location. Mirrors the guard already in
+    ``delete_project``."""
+    root = projects_root()
+    candidate = (root / slug).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as e:
+        raise ProjectError(f"slug escapes projects root: {slug!r}") from e
+    return candidate
 
 
 def _manifest_path(project_dir: Path) -> Path:
