@@ -45,9 +45,47 @@ async function jsonFetch<T>(
   return res.json() as Promise<T>;
 }
 
+export type KeyStatus = {
+  set: boolean;
+  source: "in_memory" | "env" | "unset";
+};
+
+export type KeysStatusResponse = {
+  anthropic: KeyStatus;
+  groq: KeyStatus;
+};
+
+export type KeyValidation = {
+  ok: boolean | null;
+  error?: string | null;
+};
+
+export type KeysValidateResponse = {
+  anthropic: KeyValidation;
+  groq: KeyValidation;
+};
+
 export const api = {
   // ─── Sync ──────────────────────────────────────────────────────────────
   health: () => jsonFetch<{ status: string; service: string }>("/health"),
+
+  // ─── Settings: API keys ────────────────────────────────────────────────
+  // The sidecar holds keys in-memory only. The frontend reads them from
+  // the OS keychain on launch and pushes via setKeys(). Status never
+  // includes the actual key values — just whether each is set and where
+  // it came from.
+  keysStatus: () => jsonFetch<KeysStatusResponse>("/settings/keys/status"),
+
+  setKeys: (req: { anthropic?: string; groq?: string }) =>
+    jsonFetch<KeysStatusResponse>("/settings/keys", {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+
+  validateKeys: () =>
+    jsonFetch<KeysValidateResponse>("/settings/keys/validate", {
+      method: "POST",
+    }),
 
   // ─── Projects ──────────────────────────────────────────────────────────
   listProjects: () => jsonFetch<ProjectsListResponse>("/projects"),

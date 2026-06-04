@@ -9,10 +9,27 @@ import type { ProjectSummary } from "../api/types";
  * one or create one before they can do anything else — projects are the
  * scope for all sources, plans, renders, and history.
  */
-export function WelcomeScreen() {
+export function WelcomeScreen({
+  onOpenSettings,
+}: {
+  onOpenSettings: () => void;
+}) {
   const open = useActiveProject((s) => s.open);
   const error = useActiveProject((s) => s.error);
   const [creating, setCreating] = useState(false);
+
+  // Surface a "your AI keys aren't set" banner so first-launch users
+  // know they need to do this before pipeline / Cadence actions work.
+  // Non-blocking — render-only / splice-only flows still function.
+  const keysStatusQuery = useQuery({
+    queryKey: ["keys-status"],
+    queryFn: () => api.keysStatus(),
+    staleTime: 30_000,
+    retry: 3,
+  });
+  const anthropicMissing = keysStatusQuery.data?.anthropic.set === false;
+  const groqMissing = keysStatusQuery.data?.groq.set === false;
+  const someKeyMissing = anthropicMissing || groqMissing;
 
   // Always refetch on mount so closing a project + returning to welcome
   // (or coming back to the app after creating/deleting elsewhere) shows
@@ -43,6 +60,27 @@ export function WelcomeScreen() {
           <div className="mb-4 text-sm text-rose-400 border border-rose-400/40 bg-rose-400/10 rounded-md px-3 py-2">
             {error}
           </div>
+        )}
+
+        {someKeyMissing && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="mb-4 w-full text-left text-sm border border-amber-400/40 bg-amber-400/5 hover:bg-amber-400/10 text-amber-200 rounded-md px-3 py-2 transition-colors flex items-center justify-between gap-3"
+          >
+            <span>
+              <span className="font-medium">Add your API keys</span>{" "}
+              <span className="text-amber-200/70">
+                — {anthropicMissing && groqMissing
+                  ? "Anthropic + Groq keys"
+                  : anthropicMissing
+                    ? "Anthropic key"
+                    : "Groq key"}{" "}
+                needed for AI features.
+              </span>
+            </span>
+            <span className="shrink-0 text-xs">Open settings →</span>
+          </button>
         )}
 
         <div className="space-y-4">

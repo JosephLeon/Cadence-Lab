@@ -271,11 +271,13 @@ def transcribe_groq(
     """
     from groq import Groq
 
-    api_key = os.getenv("GROQ_API_KEY")
+    from . import keys
+
+    api_key = keys.get_key("groq")
     if not api_key:
         raise RuntimeError(
-            "GROQ_API_KEY is not set. Add it to .env (see .env.example) or "
-            "switch to the 'local' backend."
+            "Groq API key not set. Add it via the Settings panel in the "
+            "app, set GROQ_API_KEY in .env, or switch to the 'local' backend."
         )
 
     work_dir = Path(tempfile.mkdtemp(prefix="ve_groq_"))

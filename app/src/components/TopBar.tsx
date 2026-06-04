@@ -8,9 +8,10 @@ interface Props {
   serverOk: boolean | null;
   view: AppView;
   onViewChange: (view: AppView) => void;
+  onOpenSettings: () => void;
 }
 
-export function TopBar({ serverOk, view, onViewChange }: Props) {
+export function TopBar({ serverOk, view, onViewChange, onOpenSettings }: Props) {
   const hasProject = useActiveProject((s) => s.project !== null);
   const openCadence = useCadence((s) => s.setOpen);
   // Only surface the server indicator when it's actually informative —
@@ -72,6 +73,14 @@ export function TopBar({ serverOk, view, onViewChange }: Props) {
           </span>
         </div>
       )}
+
+      <button
+        onClick={onOpenSettings}
+        className="h-8 w-8 rounded-md text-text-secondary hover:bg-bg-elevated hover:text-text-primary transition-colors flex items-center justify-center text-base"
+        title="Settings — API keys"
+      >
+        ⚙
+      </button>
     </header>
   );
 }

@@ -302,10 +302,13 @@ def classify(
     progress: ProgressFn | None = None,
 ) -> ClassificationBundle:
     """Run pause + filler + retake classification on a stage-2 speech analysis."""
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    from . import keys
+
+    api_key = keys.get_key("anthropic")
     if not api_key:
         raise RuntimeError(
-            "ANTHROPIC_API_KEY is not set. Add it to .env (see .env.example)."
+            "Anthropic API key not set. Add it via the Settings panel "
+            "in the app, or set ANTHROPIC_API_KEY in .env."
         )
 
     if progress:

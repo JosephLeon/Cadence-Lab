@@ -860,9 +860,14 @@ def query(
     fed back to Claude. Action tools are recorded as `ProposedAction`s and
     acked back to Claude so it knows the proposal was accepted.
     """
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    from . import keys as keys_mod
+
+    key = api_key or keys_mod.get_key("anthropic")
     if not key:
-        raise RuntimeError("ANTHROPIC_API_KEY not set")
+        raise RuntimeError(
+            "Anthropic API key not set. Add it via the Settings panel "
+            "in the app, or set ANTHROPIC_API_KEY in .env."
+        )
 
     client = anthropic.Anthropic(api_key=key)
     ctx = CadenceContext(project=project, active_source_rel=active_source_rel)

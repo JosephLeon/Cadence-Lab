@@ -205,6 +205,121 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "cadence-lab"}
 
 
+# ─── Settings: API keys ──────────────────────────────────────────────────────
+#
+# Keys live in-memory only for the lifetime of the sidecar (see
+# ``cadence_lab.keys``). The Tauri shell reads them from the OS keychain on
+# launch and pushes them here; ``.env``-set vars remain a dev fallback. We
+# never echo a key back — the GET endpoint only returns whether each is set
+# and where it came from, so the UI can render ✓/✗ without leaking secrets.
+
+from . import keys as _keys_mod  # noqa: E402
+
+
+class KeySettings(BaseModel):
+    """Patch keys in-memory. Either field can be omitted to leave that key
+    untouched; an empty string explicitly clears it (drops back to env-var
+    fallback if one is set there)."""
+    anthropic: str | None = None
+    groq: str | None = None
+
+
+class KeyStatus(BaseModel):
+    """Per-provider key status. ``source`` is the truth-tracking field —
+    'in_memory' = pushed from the Settings UI, 'env' = loaded from .env,
+    'unset' = neither. The frontend uses it to tell the user e.g. 'Active
+    key was loaded from your .env file' so they know what's happening."""
+    set: bool
+    source: Literal["in_memory", "env", "unset"]
+
+
+class KeysStatusResponse(BaseModel):
+    anthropic: KeyStatus
+    groq: KeyStatus
+
+
+@app.get("/settings/keys/status", response_model=KeysStatusResponse)
+def keys_status() -> KeysStatusResponse:
+    return KeysStatusResponse(
+        anthropic=KeyStatus(
+            set=_keys_mod.is_configured("anthropic"),
+            source=_keys_mod.source_of("anthropic"),
+        ),
+        groq=KeyStatus(
+            set=_keys_mod.is_configured("groq"),
+            source=_keys_mod.source_of("groq"),
+        ),
+    )
+
+
+@app.post("/settings/keys", response_model=KeysStatusResponse)
+def set_keys(req: KeySettings) -> KeysStatusResponse:
+    """Patch one or both keys in the in-memory store.
+
+    Sentinel semantics on the request fields:
+    - ``None`` (omitted)   → leave that provider's key untouched
+    - ``""`` (empty)       → clear the in-memory entry (env fallback wins)
+    - any other string     → store as the new in-memory key
+    """
+    if req.anthropic is not None:
+        _keys_mod.set_key("anthropic", req.anthropic or None)
+    if req.groq is not None:
+        _keys_mod.set_key("groq", req.groq or None)
+    return keys_status()
+
+
+class KeyValidation(BaseModel):
+    """Per-provider validation result. ``ok`` is None when no key is
+    configured for that provider (don't call the API just to fail)."""
+    ok: bool | None
+    error: str | None = None
+
+
+class KeysValidateResponse(BaseModel):
+    anthropic: KeyValidation
+    groq: KeyValidation
+
+
+@app.post("/settings/keys/validate", response_model=KeysValidateResponse)
+def validate_keys() -> KeysValidateResponse:
+    """Live-check both keys against their providers' lightest endpoints.
+
+    Used by the Settings modal's Save button so the user sees a green
+    checkmark before closing the dialog (or a red one if they pasted a
+    typo). Each check is wrapped — a network error or bad key reports as
+    ``ok=False`` with the error text, not a 500.
+    """
+    results: dict[str, KeyValidation] = {}
+
+    # Anthropic — cheapest check is models.list().
+    if _keys_mod.is_configured("anthropic"):
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=_keys_mod.get_key("anthropic"))
+            client.models.list()
+            results["anthropic"] = KeyValidation(ok=True)
+        except Exception as e:
+            results["anthropic"] = KeyValidation(ok=False, error=str(e)[:200])
+    else:
+        results["anthropic"] = KeyValidation(ok=None)
+
+    # Groq — same idea.
+    if _keys_mod.is_configured("groq"):
+        try:
+            from groq import Groq
+
+            client = Groq(api_key=_keys_mod.get_key("groq"))
+            client.models.list()
+            results["groq"] = KeyValidation(ok=True)
+        except Exception as e:
+            results["groq"] = KeyValidation(ok=False, error=str(e)[:200])
+    else:
+        results["groq"] = KeyValidation(ok=None)
+
+    return KeysValidateResponse(**results)
+
+
 # ─── Projects ────────────────────────────────────────────────────────────────
 
 

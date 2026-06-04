@@ -9,7 +9,9 @@ import { ReviewPanel } from "./components/ReviewPanel";
 import { SplicingView } from "./components/SplicingView";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { CadencePanel } from "./components/CadencePanel";
+import { SettingsModal } from "./components/SettingsModal";
 import { api } from "./api/client";
+import { keychainGet } from "./lib/keystore";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useActiveProject } from "./stores/activeProject";
 import { useProject } from "./stores/project";
@@ -19,6 +21,7 @@ import { useProjectSourceSync } from "./hooks/useProjectSourceSync";
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const view = useAppView((s) => s.view);
   const setView = useAppView((s) => s.setView);
   useKeyboardShortcuts();
@@ -77,6 +80,39 @@ export default function App() {
     };
   }, []);
 
+  // After the sidecar is reachable, push the user's keychain-stored API
+  // keys to it. The sidecar holds them in memory only for the session;
+  // every cold start needs this handoff. No-op in browser dev mode (no
+  // Tauri = no keychain access), where the sidecar's .env fallback wins.
+  useEffect(() => {
+    if (serverOk !== true) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [anthropic, groq] = await Promise.all([
+          keychainGet("anthropic"),
+          keychainGet("groq"),
+        ]);
+        if (cancelled) return;
+        // Only push fields where we actually have a key — sending an
+        // empty string would clear the in-memory entry and leave the
+        // sidecar dependent on .env, which we don't want if there's a
+        // valid keychain entry pending a future write.
+        const patch: { anthropic?: string; groq?: string } = {};
+        if (anthropic) patch.anthropic = anthropic;
+        if (groq) patch.groq = groq;
+        if (Object.keys(patch).length > 0) {
+          await api.setKeys(patch);
+        }
+      } catch (e) {
+        console.warn("failed to push keychain keys to sidecar:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [serverOk]);
+
   // Layout:
   //   ┌────────────────────────────────────┐
   //   │ TopBar (full width)                │
@@ -88,13 +124,18 @@ export default function App() {
   //   └────────────────────────────────────┘
   return (
     <div className="h-full w-full flex flex-col">
-      <TopBar serverOk={serverOk} view={view} onViewChange={setView} />
+      <TopBar
+        serverOk={serverOk}
+        view={view}
+        onViewChange={setView}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
       {projectLoading ? (
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
           Loading project…
         </div>
       ) : !project ? (
-        <WelcomeScreen />
+        <WelcomeScreen onOpenSettings={() => setSettingsOpen(true)} />
       ) : view === "ai" ? (
         <>
           <div className="flex-1 flex min-h-0">
@@ -116,6 +157,9 @@ export default function App() {
       {/* Ask Cadence overlay — renders on top of whichever view is active
           when the user opens it from the TopBar. Self-gates on project. */}
       {project && <CadencePanel />}
+      {settingsOpen && (
+        <SettingsModal onClose={() => setSettingsOpen(false)} />
+      )}
     </div>
   );
 }
