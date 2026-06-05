@@ -1,10 +1,17 @@
 # Cadence Lab
 
-**An AI-driven semantic video editor for YouTube creators.** Drop in an OBS
-recording; Cadence Lab transcribes it with Whisper, asks Claude Opus 4.7 to
-classify every pause and filler word *in context* (not by amplitude), plans
-the cuts as pure interval algebra, lets you review them with per-cut audio
-playback, and renders a YouTube-ready MP4 with hardware-accelerated FFmpeg.
+**An AI-driven semantic video editor for YouTube creators.** Drop in any
+video file (`.mov`, `.mp4`, `.mkv`, `.m4v`, `.avi`, `.webm`). Cadence Lab
+transcribes it with Whisper, asks Claude Opus 4.7 to classify every pause
+and filler word *in context* (not by amplitude), plans the cuts as pure
+interval algebra, lets you review them with per-cut audio playback, and
+renders a YouTube-ready MP4 with hardware-accelerated FFmpeg.
+
+Works on anything with a spoken-word audio track: OBS screen recordings,
+podcast videos, camera footage, Zoom recordings, talking-head webcam
+captures. Multi-track sources (e.g. OBS's separate mic + desktop audio)
+let you point the classifier at just the voice channel for cleaner pause
+detection.
 
 Then **Ask Cadence**. Type "remove the um at 1:23", "cut every sniffle",
 "find when the walnut table is on screen", or "pull a 60-second highlight
@@ -280,10 +287,12 @@ archival CPU encode at `-preset slow -crf 18`.
 ### Stage 1: Ingest ([`ingest.py`](src/cadence_lab/ingest.py))
 
 Probes the source with `ffprobe`, detects variable frame rate, and extracts
-the mic track alone as 16 kHz mono PCM WAV. **Mic-only matters:** OBS records
-mic and desktop audio on separate tracks; if the analyzer sees desktop audio,
-game sounds or background music will mask the speech pauses we're trying to
-classify.
+one selected audio track as 16 kHz mono PCM WAV. **Mic-only matters:**
+multi-track screen recorders like OBS often route mic and desktop audio to
+separate tracks; if the analyzer sees desktop audio, game sounds or
+background music will mask the speech pauses we're trying to classify.
+Single-track sources (camera footage, phone video, Zoom recordings) just
+use track 0 by default.
 
 ### Stage 2: Speech analysis ([`speech.py`](src/cadence_lab/speech.py) + [`backends.py`](src/cadence_lab/backends.py))
 
