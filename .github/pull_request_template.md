@@ -4,7 +4,7 @@
 
 ## Why
 
-<!-- The motivation — bug being fixed, feature being added, refactor
+<!-- The motivation: bug being fixed, feature being added, refactor
 justification. Link to the issue if there is one (`Fixes #N`). -->
 
 ## How I tested

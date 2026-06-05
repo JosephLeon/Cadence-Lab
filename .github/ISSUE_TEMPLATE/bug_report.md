@@ -37,7 +37,7 @@ labels: bug
 ## Sample input
 
 <!-- If applicable, attach (or link to) a short video/audio snippet that
-reproduces the bug. Even 5-10 seconds is enough — many bugs only repro
+reproduces the bug. Even 5-10 seconds is enough, since many bugs only repro
 with specific audio characteristics. -->
 
 ## Additional context

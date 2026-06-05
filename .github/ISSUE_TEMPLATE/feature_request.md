@@ -17,7 +17,7 @@ Concrete is better than abstract: "I want to remove all my own laughs from
 
 ## What you'd want it to look like
 
-<!-- Rough sketch — could be a UI flow, a CLI invocation, an Ask Cadence
+<!-- Rough sketch. Could be a UI flow, a CLI invocation, an Ask Cadence
 prompt, a JSON output shape, whatever fits. -->
 
 ## Anything you've already considered

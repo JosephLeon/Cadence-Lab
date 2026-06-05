@@ -49,8 +49,8 @@ project and not relitigate decisions.
 - **Portfolio narrative:** Rust shell + Python pipeline + React UI is a stronger
   full-stack story than Electron + Python + React
 
-The downside (smaller library ecosystem than Electron) doesn't matter here —
-all the video-editor primitives we need (wavesurfer.js, react-rnd, video.js,
+The downside (smaller library ecosystem than Electron) doesn't matter here.
+All the video-editor primitives we need (wavesurfer.js, react-rnd, video.js,
 react-query, zustand) work in any browser webview regardless of shell.
 
 ### Why a Python sidecar over rewriting the pipeline
@@ -58,7 +58,7 @@ react-query, zustand) work in any browser webview regardless of shell.
 The pipeline is ~2,000 LOC of *thoughtful* Python: structured outputs with
 prompt caching, Claude Opus 4.7 with adaptive thinking, Silero VAD, Whisper,
 FFmpeg filter graphs. Rewriting it in TypeScript or Rust would take weeks and
-add zero value — none of the speed-sensitive bits are written in Python
+add zero value: none of the speed-sensitive bits are written in Python
 (ffmpeg subprocess, Groq API, Claude API are all elsewhere). The sidecar
 pattern lets us keep the brain in Python without forcing the frontend to be
 Python too.
@@ -71,7 +71,7 @@ Python too.
   ever want one.
 - **SSE** for streaming progress. One-way (server → client), built into
   browsers (`EventSource`), auto-reconnects, no extra framing logic. The
-  alternative — WebSockets — would force async-context complexity for what
+  alternative (WebSockets) would force async-context complexity for what
   is fundamentally a "give me updates on this long-running job" use case.
 - **Native Tauri IPC** would couple the frontend to Tauri (no browser fallback)
   and offer no real wins for the speed of operations we care about.
@@ -81,8 +81,8 @@ Python too.
 All the pipeline stages are sync code that calls into native libraries
 (faster-whisper, Silero VAD via PyTorch, ffmpeg subprocesses, Groq SDK,
 Anthropic SDK). Trying to await them would mean running them in a threadpool
-anyway. We use `ThreadPoolExecutor(max_workers=2)` directly — limit of 2
-because two ffmpeg encodes at once would thrash a single machine.
+anyway. We use `ThreadPoolExecutor(max_workers=2)` directly. The cap of 2
+is because two ffmpeg encodes at once would thrash a single machine.
 
 ## Backend (FastAPI sidecar)
 
@@ -99,8 +99,8 @@ uv run cadence-lab server --reload  # dev: hot reload on code change
 
 | Kind | Endpoints | Returns |
 |---|---|---|
-| Sync — fast | `GET /health`, `POST /probe`, `POST /plan`, `POST /apply-overrides` | Result body directly |
-| Async — slow | `POST /analyze`, `POST /classify`, `POST /render` | `{job_id}` immediately |
+| Sync (fast) | `GET /health`, `POST /probe`, `POST /plan`, `POST /apply-overrides` | Result body directly |
+| Async (slow) | `POST /analyze`, `POST /classify`, `POST /render` | `{job_id}` immediately |
 | Job introspection | `GET /jobs/{id}`, `GET /jobs/{id}/events` (SSE) | Current state / event stream |
 | Media | `GET /files/{name}`, `GET /audio-clip?audio_path=…&start=…&end=…` | Binary (MP4 / MP3 / WAV) |
 | Bundle reads | `GET /analysis`, `GET /classification`, `GET /plan-bundle` | Pydantic bundles |
@@ -120,7 +120,7 @@ desktop single-user app; would need Redis/DB for multi-user SaaS.
 **API docs:** auto-generated at `http://localhost:27182/docs` (Swagger UI) and
 `/redoc`. Hit those during development to explore the schema interactively.
 
-## Frontend (to be built — Phase 2)
+## Frontend (to be built, Phase 2)
 
 **Stack target:**
 
@@ -150,7 +150,7 @@ Path the frontend will live in: `app/` (alongside `src/cadence_lab/`).
 Decision deferred: Vite + React-Router vs Next.js. Vite is the simpler choice
 for a desktop-bundled app where SSR/routing aren't load-bearing.
 
-## Tauri wrapper (Phase 7 — landed)
+## Tauri wrapper (Phase 7, landed)
 
 The Tauri Rust shell lives in `app/src-tauri/`. Its responsibilities:
 
@@ -159,20 +159,20 @@ The Tauri Rust shell lives in `app/src-tauri/`. Its responsibilities:
    `pyproject.toml` and runs `uv` in that directory.
 2. Manage the `Child` handle in app state (`SidecarHandle(Mutex<Option<Child>>)`).
 3. On `RunEvent::ExitRequested` / `Exit`, take the handle, kill the process,
-   and wait — so closing the app stops the backend too (no orphans).
+   and wait, so closing the app stops the backend too (no orphans).
 4. Show the React UI inside a native WKWebView on macOS.
 
 Code: [`app/src-tauri/src/lib.rs`](../app/src-tauri/src/lib.rs).
 
-### Dev vs production sidecar bundling — current state
+### Dev vs production sidecar bundling: current state
 
 | Mode | How the sidecar runs | Status |
 |---|---|---|
-| `tauri dev` | Rust shell spawns `uv run cadence-lab server` from the workspace root | ✅ working — used today |
+| `tauri dev` | Rust shell spawns `uv run cadence-lab server` from the workspace root | ✅ working, used today |
 | `tauri build` (.dmg) | Same spawn, requires `uv` + `cadence-lab` installed on the user's machine | ⚠ works but user-dependent |
 | Fully self-contained `.dmg` | PyInstaller-frozen sidecar binary, bundled as a Tauri `externalBin` and shipped inside the .app | ⏳ deferred |
 
-The deferred work — full self-contained bundle — needs:
+The deferred work (full self-contained bundle) needs:
 
 - **PyInstaller (or Nuitka) to freeze the Python sidecar** to a single binary.
   Will need careful handling of native deps with non-trivial loaders:
@@ -202,7 +202,7 @@ cadence-lab/
 │   ├── planner.py
 │   ├── renderer.py
 │   ├── reviewer.py
-│   ├── ui.py                           # ⚠️ legacy Streamlit — being phased out
+│   ├── ui.py                           # ⚠️ legacy Streamlit, being phased out
 │   ├── cli.py                          # ✅ + `server`, `migrate` subcommands
 │   └── ...
 ├── app/                                # ✅ Frontend + Tauri shell
