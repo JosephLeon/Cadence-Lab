@@ -1,6 +1,12 @@
 import { useRef, useState } from "react";
 import { api } from "../api/client";
 import { useActiveProject } from "../stores/activeProject";
+import { useProject } from "../stores/project";
+import {
+  describeLineage,
+  detectRenderLineage,
+  type RenderLineageMatch,
+} from "../lib/renderLineage";
 
 const VIDEO_EXTS = ["mov", "mp4", "mkv", "m4v", "avi", "webm"];
 const isVideoFile = (name: string) =>
@@ -26,23 +32,69 @@ export function MediaAddPanel() {
     | { paths: string[]; suggestedMode: "copy" | "reference" }
     | null
   >(null);
+  // Lineage prompt: shown when the user tries to add a file that's
+  // actually a render in this project's history. Distinct from the add
+  // modal so the user can pick "continue editing source" without going
+  // through the copy-vs-reference dance.
+  const [lineagePrompt, setLineagePrompt] = useState<
+    | { addedPath: string; match: RenderLineageMatch; suggestedMode: "copy" | "reference" }
+    | null
+  >(null);
   const [uploads, setUploads] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const projectAvailable = !!project;
 
-  /** Append a path to the pending-add queue, opening the modal if needed. */
+  /** Append a path to the pending-add queue, opening the modal if needed.
+   *
+   *  Special case: if the path is one of this project's previous renders,
+   *  we surface a "continue editing the source instead?" prompt rather
+   *  than letting the user accidentally add a derived MP4 as a fresh
+   *  source (which would force a full pipeline re-run and burn tokens).
+   */
   const queueAdd = (path: string, suggestedMode: "copy" | "reference") => {
     const trimmed = path.trim();
     if (!trimmed) return;
     setError(null);
+    if (project) {
+      const match = detectRenderLineage(project, trimmed);
+      if (match) {
+        setLineagePrompt({ addedPath: trimmed, match, suggestedMode });
+        return;
+      }
+    }
     setPendingAdd((prev) => {
       if (prev) {
         if (prev.paths.includes(trimmed)) return prev;
         return { ...prev, paths: [...prev.paths, trimmed] };
       }
       return { paths: [trimmed], suggestedMode };
+    });
+  };
+
+  /** "Continue editing source" button on the lineage prompt: jump the
+   *  AI tab to the source video the render was derived from. Source must
+   *  already be in this project's sources (which it almost always is —
+   *  a render can't exist without its source having been added). */
+  const continueEditingSource = () => {
+    if (!lineagePrompt?.match.sourceAbsPath) return;
+    useProject.getState().setActive(lineagePrompt.match.sourceAbsPath);
+    setLineagePrompt(null);
+  };
+
+  /** "Add anyway" escape hatch: drop the lineage match and treat the file
+   *  as a brand-new source. The user is taking the token hit knowingly. */
+  const addAnywayDespiteLineage = () => {
+    if (!lineagePrompt) return;
+    const { addedPath, suggestedMode } = lineagePrompt;
+    setLineagePrompt(null);
+    setPendingAdd((prev) => {
+      if (prev) {
+        if (prev.paths.includes(addedPath)) return prev;
+        return { ...prev, paths: [...prev.paths, addedPath] };
+      }
+      return { paths: [addedPath], suggestedMode };
     });
   };
 
@@ -150,6 +202,111 @@ export function MediaAddPanel() {
           onConfirm={performAdd}
         />
       )}
+
+      {lineagePrompt && (
+        <RenderLineageModal
+          addedPath={lineagePrompt.addedPath}
+          match={lineagePrompt.match}
+          onContinueEditingSource={continueEditingSource}
+          onAddAnyway={addAnywayDespiteLineage}
+          onCancel={() => setLineagePrompt(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Hey, this is one of your renders" prompt.
+ *
+ * Surfaced whenever a user tries to add a file that matches an entry in
+ * the project's render_history. The default path here is to send them
+ * back to the original source so their next render reuses the cached
+ * analysis and classification, costing zero new tokens. The "Add anyway"
+ * button is the escape hatch for users who genuinely want to treat the
+ * render as a fresh source (e.g. to A/B different classifier settings
+ * against the rendered output, or because they edited it externally).
+ */
+function RenderLineageModal({
+  addedPath,
+  match,
+  onContinueEditingSource,
+  onAddAnyway,
+  onCancel,
+}: {
+  addedPath: string;
+  match: RenderLineageMatch;
+  onContinueEditingSource: () => void;
+  onAddAnyway: () => void;
+  onCancel: () => void;
+}) {
+  const fileName = addedPath.split("/").pop() ?? addedPath;
+  const sourceName = match.sourceAbsPath?.split("/").pop() ?? null;
+  const canContinue = Boolean(match.sourceAbsPath);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onCancel}
+    >
+      <div
+        className="w-[520px] max-w-[92vw] rounded-lg border border-border bg-bg-panel shadow-2xl p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-base font-semibold text-text-primary mb-1">
+          That's one of your renders
+        </h3>
+        <p className="text-xs text-text-muted mb-3 leading-snug">
+          <code className="font-mono">{fileName}</code> was produced by this
+          project: {describeLineage(match)}.
+        </p>
+        <p className="text-xs text-text-muted mb-4 leading-snug">
+          {canContinue ? (
+            <>
+              Adding it as a new source would re-run the full AI pipeline
+              (transcription + classification) on the rendered audio,
+              charging Anthropic and Groq tokens again. If you just want to
+              iterate on this render, continue editing{" "}
+              <code className="font-mono">{sourceName}</code>: tweak cuts,
+              overrides, or audio settings and re-render. No new AI cost.
+            </>
+          ) : (
+            <>
+              This is a splice render, so there isn't a single source to
+              jump back to. Adding it as a new source will re-run the full
+              pipeline and charge new tokens.
+            </>
+          )}
+        </p>
+
+        <div className="flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="h-8 px-3 rounded bg-bg-elevated hover:bg-border text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onAddAnyway}
+            className="h-8 px-3 rounded bg-bg-elevated hover:bg-border text-sm text-text-secondary"
+            title="Treat this render as a new source. The full pipeline will run and charge tokens."
+          >
+            Add anyway
+          </button>
+          {canContinue && (
+            <button
+              type="button"
+              onClick={onContinueEditingSource}
+              className="h-8 px-4 rounded bg-accent hover:bg-accent/80 text-white text-sm font-medium"
+              title="Switch the AI tab to the original source. Pipeline artifacts already cached."
+            >
+              Continue editing {sourceName}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

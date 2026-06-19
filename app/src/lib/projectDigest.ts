@@ -257,5 +257,6 @@ function relTime(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-// Re-export so callers don't reach across modules for these.
-export { ProjectSpliceClip };
+// Re-export so callers don't reach across modules for these. `export type`
+// (not `export {}`) is required by tsconfig's `verbatimModuleSyntax: true`.
+export type { ProjectSpliceClip };

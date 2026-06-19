@@ -682,16 +682,62 @@ def analyze_endpoint(req: AnalyzeRequest) -> JobHandle:
             cb = _progress_for(job)
             cb(0.0, "Extracting mic-only audio...")
             ing = ingest(source=src, mic_track_index=req.mic_track)
-            speech = run_analyze(
-                audio_path=ing.normalized_audio_path,
-                backend=req.backend,
-                language=req.language,
-                progress=cb,
+
+            # Content-hash cache: hash the extracted mic WAV and skip the
+            # Whisper call if we've transcribed identical audio before
+            # (re-imports, copies across projects, etc.). The hash takes
+            # ~1s for a 30-min recording; transcription takes 30-60s on
+            # Groq and costs ~$0.05.
+            from . import _analysis_cache
+
+            audio_hash = _analysis_cache.hash_audio_file(
+                ing.normalized_audio_path
             )
+            cached = _analysis_cache.lookup(audio_hash)
+            if cached is not None:
+                cb(
+                    0.95,
+                    "Reusing cached transcription (matching audio found, no AI cost)…",
+                )
+                # Rewrite the audio_path so downstream consumers reading
+                # the bundle find the WAV at *this* source's canonical
+                # location, not the original.
+                speech_dict = cached["speech"]
+                speech_dict["audio_path"] = str(ing.normalized_audio_path)
+                from .models import SpeechAnalysis as _SpeechAnalysis
+
+                speech = _SpeechAnalysis.model_validate(speech_dict)
+            else:
+                speech = run_analyze(
+                    audio_path=ing.normalized_audio_path,
+                    backend=req.backend,
+                    language=req.language,
+                    progress=cb,
+                )
+
             bundle = AnalysisBundle(ingest=ing, speech=speech)
             out = analysis_path(src)
             out.write_text(json.dumps(bundle.model_dump(mode="json"), indent=2))
-            job.finish("done", result={"analysis_path": str(out)})
+
+            # On cache miss, persist the bundle so the next analyze of the
+            # same audio (same hash) skips Whisper entirely.
+            if cached is None:
+                try:
+                    _analysis_cache.store(
+                        audio_hash, bundle.model_dump(mode="json")
+                    )
+                except Exception:
+                    # Cache write failures are non-fatal — the analysis
+                    # still succeeded; we just don't get the speedup next time.
+                    pass
+
+            job.finish(
+                "done",
+                result={
+                    "analysis_path": str(out),
+                    "cache_hit": cached is not None,
+                },
+            )
         except Exception as e:
             job.finish("error", error=str(e))
 
