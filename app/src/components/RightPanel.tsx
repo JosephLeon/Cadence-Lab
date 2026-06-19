@@ -553,7 +553,8 @@ function PacingTab({ item, onOpenReview, onRender }: PacingTabProps) {
           {audioOn
             ? " and bakes in the audio settings from the Audio tab."
             : "."}{" "}
-          Produces a new MP4 in the project's renders folder.
+          Produces a new MP4 in the project's renders folder. No AI cost on
+          re-render: cuts and overrides reuse the cached classification.
         </p>
         {isRendering ? (
           <div className="space-y-1.5 px-1">
@@ -688,9 +689,10 @@ function AudioTab({ item, onChange, onRender }: AudioTabProps) {
 
       <Section title="Render">
         <p className="text-[10px] text-text-muted px-1 mb-2 leading-snug">
-          Applies just the audio settings — no AI cuts. Produces a new MP4
-          in the project's renders folder. Doesn't require running the
-          pipeline first.
+          Audio-only render. No AI cost: tweak enhancement, denoise engine,
+          or ducking and re-render as often as you like without burning any
+          Anthropic or Groq tokens. Produces a new MP4 in the project's
+          renders folder.
         </p>
         {isRendering ? (
           <div className="space-y-1.5 px-1">

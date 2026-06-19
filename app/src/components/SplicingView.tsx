@@ -198,8 +198,11 @@ function Preview() {
   const at = clipAtPlayhead(timeline, playhead);
   const total = totalDuration(timeline);
 
-  const onVideoClip = at && at.clip.kind === "video";
-  const currentSrc = onVideoClip ? api.sourceUrl(at!.clip.sourcePath) : null;
+  // Narrow `at.clip` inline so TypeScript sees the "video" variant
+  // (discriminated union narrowing doesn't follow through an extracted
+  // boolean).
+  const currentSrc =
+    at && at.clip.kind === "video" ? api.sourceUrl(at.clip.sourcePath) : null;
   const lastSrcRef = useRef<string | null>(null);
 
   // Seek + swap source whenever the underlying clip changes. Only meaningful
